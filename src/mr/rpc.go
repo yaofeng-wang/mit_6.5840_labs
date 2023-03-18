@@ -26,6 +26,17 @@ type GetTaskReply struct {
 	ProgramType ProgramType
 	TaskID      int
 	PleaseExit  bool
+	PleaseWait  bool
+	NumReduce   int
+	NumMap      int
+}
+
+type CompletedTaskArgs struct {
+	TaskID      int
+	ProgramType ProgramType
+}
+
+type CompletedTaskReply struct {
 }
 
 // Cook up a unique-ish UNIX-domain socket name

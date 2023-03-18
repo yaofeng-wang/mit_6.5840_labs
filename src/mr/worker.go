@@ -1,12 +1,15 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -14,6 +17,12 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -26,34 +35,104 @@ func ihash(key string) int {
 // Worker is called by main/mrworker.go
 func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []string) string) {
 	for {
-
-		filename, programType, taskID, pleaseExit := CallGetTask()
+		filename, programType, taskID, nReduce, nMap, pleaseWait, pleaseExit := CallGetTask()
 		if pleaseExit {
 			fmt.Println("Exiting.")
-			return
+			os.Exit(1)
 		}
 
-		fmt.Printf("Received unfinished task: %v\n", taskID)
+		if pleaseWait {
+			fmt.Println("Waiting.")
+			time.Sleep(time.Second * 1)
+			continue
+		}
+
 		if programType == Map {
+			fmt.Printf("Received task: ProgramType=%v TaskID=%v Filename=%v\n", programType, taskID, filename)
 			file, err := os.Open(filename)
 			if err != nil {
 				log.Fatalf("cannot open %v", filename)
-				return
+				os.Exit(1)
 			}
 			content, err := io.ReadAll(file)
 			if err != nil {
 				log.Fatalf("cannot read %v", filename)
-				return
+				os.Exit(1)
 			}
 			file.Close()
-			kva := mapFunc(filename, string(content))
-			fmt.Println(filename, ":", kva)
-			CallCompletedTask(taskID)
+			intermediate := mapFunc(filename, string(content))
+
+			outputFiles := make([]*os.File, nReduce)
+			for i := range outputFiles {
+				outputFileName := fmt.Sprintf("mr-%d-%d", taskID, i)
+				outputFile, _ := os.Create(outputFileName)
+				outputFiles[i] = outputFile
+			}
+
+			outputKV := make([][]KeyValue, nReduce)
+			for _, kv := range intermediate {
+				reduceTaskID := ihash(kv.Key) % nReduce
+				outputKV[reduceTaskID] = append(outputKV[reduceTaskID], kv)
+			}
+
+			for i := range outputKV {
+				enc := json.NewEncoder(outputFiles[i])
+				for _, kv := range outputKV {
+					enc.Encode(kv)
+				}
+				outputFiles[i].Close()
+			}
+			CallCompletedTask(taskID, programType)
+		} else {
+			fmt.Printf("Received task: ProgramType=%v TaskID=%v\n", programType, taskID)
+			KVs := make([]KeyValue, 0)
+
+			for i := 0; i < nMap; i++ {
+				filename := fmt.Sprintf("mr-%v-%v", i, taskID)
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatal(err)
+					os.Exit(1)
+				}
+				dec := json.NewDecoder(file)
+				for {
+					var kvs []KeyValue
+					if err := dec.Decode(&kvs); err != nil {
+						if err != io.EOF {
+							log.Fatal(err)
+						}
+						break
+					}
+					//fmt.Println(kvs)
+					KVs = append(KVs, kvs...)
+				}
+				file.Close()
+			}
+
+			outputFileName := fmt.Sprintf("mr-out-%d", taskID)
+			outputFile, _ := os.Create(outputFileName)
+			sort.Sort(ByKey(KVs))
+			i := 0
+			for i < len(KVs) {
+				j := i + 1
+				for j < len(KVs) && KVs[j].Key == KVs[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, KVs[k].Value)
+				}
+				output := reduceFunc(KVs[i].Key, values)
+				fmt.Fprintf(outputFile, "%v %v\n", KVs[i].Key, output)
+				i = j
+			}
+			CallCompletedTask(taskID, programType)
 		}
 	}
 }
 
-func CallGetTask() (filename string, programType ProgramType, taskID int, pleaseExit bool) {
+func CallGetTask() (filename string, programType ProgramType,
+	taskID int, nReduce int, nMap int, pleaseWait bool, pleaseExit bool) {
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
 	ok := call("Coordinator.GetTask", &args, &reply)
@@ -61,12 +140,13 @@ func CallGetTask() (filename string, programType ProgramType, taskID int, please
 		fmt.Println("call failed!")
 		os.Exit(1)
 	}
-	return reply.File, reply.ProgramType, reply.TaskID, reply.PleaseExit
+	return reply.File, reply.ProgramType, reply.TaskID, reply.NumReduce, reply.NumMap, reply.PleaseWait, reply.PleaseExit
 }
 
-func CallCompletedTask(taskID int) {
+func CallCompletedTask(taskID int, programType ProgramType) {
 	args := CompletedTaskArgs{}
 	args.TaskID = taskID
+	args.ProgramType = programType
 	reply := CompletedTaskReply{}
 	ok := call("Coordinator.CompletedTask", &args, &reply)
 	if !ok {

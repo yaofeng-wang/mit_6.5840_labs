@@ -11,54 +11,83 @@ import (
 )
 
 type Coordinator struct {
-	// Your definitions here.
-	mu        sync.Mutex
-	files     []string
-	nReduce   int
-	completed []bool
-	assigned  []bool
-	timeout   chan int
-}
+	mu sync.Mutex
 
-// Your code here -- RPC handlers for the worker to call.
+	files []string
+
+	nMap                 int
+	assignedMapTasks     []bool
+	completedMapTasks    []bool
+	numCompletedMapTasks int
+
+	nReduce                 int
+	assignedReduceTasks     []bool
+	completedReduceTasks    []bool
+	numCompletedReduceTasks int
+
+	timeout chan int
+}
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	hasAssignedTask := false
-	for i := range c.assigned {
-		if !c.assigned[i] {
-			reply.File = c.files[i]
-			reply.ProgramType = Map
-			reply.TaskID = i
-			c.assigned[i] = true
-			hasAssignedTask = true
-			fmt.Printf("[GetTask]: %v %v\n", reply.TaskID, reply.File)
-			return nil
+	if c.numCompletedMapTasks < len(c.files) {
+		for i := range c.assignedMapTasks {
+			if !c.assignedMapTasks[i] {
+				reply.File = c.files[i]
+				reply.ProgramType = Map
+				reply.TaskID = i
+				reply.NumReduce = c.nReduce
+				c.assignedMapTasks[i] = true
+				fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v File=%v\n",
+					reply.ProgramType, reply.TaskID, reply.File)
+				return nil
+			}
 		}
+		fmt.Println("[GetTask]: Please Wait For Map Tasks")
+		reply.PleaseWait = true
+		return nil
 	}
-	if !hasAssignedTask {
-		reply.PleaseExit = true
-		fmt.Println("Please exit.")
+
+	if c.numCompletedReduceTasks < c.nReduce {
+		for i := range c.assignedReduceTasks {
+			if !c.assignedReduceTasks[i] {
+				reply.ProgramType = Reduce
+				reply.TaskID = i
+				reply.NumMap = len(c.files)
+				c.assignedReduceTasks[i] = true
+				fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v\n", reply.ProgramType, reply.TaskID)
+				return nil
+			}
+		}
+		fmt.Println("[GetTask]: Please Wait For Reduce Tasks")
+		reply.PleaseWait = true
+		return nil
 	}
+
+	fmt.Println("[GetTask]: Please Exit")
+	reply.PleaseExit = true
+
 	return nil
 }
 
-type CompletedTaskArgs struct {
-	TaskID int
-}
-
-type CompletedTaskReply struct {
-}
-
 func (c *Coordinator) CompletedTask(args *CompletedTaskArgs, reply *CompletedTaskReply) error {
-	taskID := args.TaskID
-	fmt.Printf("[CompletedTask]: %v\n", taskID)
+	taskID, programType := args.TaskID, args.ProgramType
+	fmt.Printf("[CompletedTask]: ProgramType=%v TaskID=%v\n", programType, taskID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.completed[taskID] = true
-
+	if programType == Map {
+		if !c.completedMapTasks[taskID] {
+			c.numCompletedMapTasks++
+		}
+		c.completedMapTasks[taskID] = true
+	} else {
+		if !c.completedReduceTasks[taskID] {
+			c.numCompletedReduceTasks++
+		}
+		c.completedReduceTasks[taskID] = true
+	}
 	return nil
 }
 
@@ -79,13 +108,11 @@ func (c *Coordinator) server() {
 // Done is called by main/mrcoordinator.go periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	for i := range c.completed {
-		if !c.completed[i] {
-			return false
-		}
+	if c.numCompletedMapTasks == c.nMap && c.numCompletedReduceTasks == c.nReduce {
+		fmt.Println("All done.")
+		return true
 	}
-	fmt.Println("All done.")
-	return true
+	return false
 }
 
 // MakeCoordinator create a Coordinator.
@@ -94,9 +121,14 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.files = files
+
+	c.nMap = len(files)
+	c.assignedMapTasks = make([]bool, c.nMap)
+	c.completedMapTasks = make([]bool, c.nMap)
+
 	c.nReduce = nReduce
-	c.assigned = make([]bool, len(files))
-	c.completed = make([]bool, len(files))
+	c.assignedReduceTasks = make([]bool, c.nReduce)
+	c.completedReduceTasks = make([]bool, c.nReduce)
 	c.timeout = make(chan int)
 
 	c.server()
