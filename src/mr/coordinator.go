@@ -1,33 +1,68 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+)
 
 type Coordinator struct {
 	// Your definitions here.
-
+	mu        sync.Mutex
+	files     []string
+	nReduce   int
+	completed []bool
+	assigned  []bool
+	timeout   chan int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	hasAssignedTask := false
+	for i := range c.assigned {
+		if !c.assigned[i] {
+			reply.File = c.files[i]
+			reply.ProgramType = Map
+			reply.TaskID = i
+			c.assigned[i] = true
+			hasAssignedTask = true
+			fmt.Printf("[GetTask]: %v %v\n", reply.TaskID, reply.File)
+			return nil
+		}
+	}
+	if !hasAssignedTask {
+		reply.PleaseExit = true
+		fmt.Println("Please exit.")
+	}
 	return nil
 }
 
+type CompletedTaskArgs struct {
+	TaskID int
+}
 
-//
+type CompletedTaskReply struct {
+}
+
+func (c *Coordinator) CompletedTask(args *CompletedTaskArgs, reply *CompletedTaskReply) error {
+	taskID := args.TaskID
+	fmt.Printf("[CompletedTask]: %v\n", taskID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.completed[taskID] = true
+
+	return nil
+}
+
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -41,29 +76,28 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-//
-// main/mrcoordinator.go calls Done() periodically to find out
+// Done is called by main/mrcoordinator.go periodically to find out
 // if the entire job has finished.
-//
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-
-	return ret
+	for i := range c.completed {
+		if !c.completed[i] {
+			return false
+		}
+	}
+	fmt.Println("All done.")
+	return true
 }
 
-//
-// create a Coordinator.
+// MakeCoordinator create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-
-	// Your code here.
-
+	c.files = files
+	c.nReduce = nReduce
+	c.assigned = make([]bool, len(files))
+	c.completed = make([]bool, len(files))
+	c.timeout = make(chan int)
 
 	c.server()
 	return &c
