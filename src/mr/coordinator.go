@@ -39,8 +39,10 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				reply.TaskID = i
 				reply.NumReduce = c.nReduce
 				c.assignedMapTasks[i] = true
-				fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v File=%v\n",
-					reply.ProgramType, reply.TaskID, reply.File)
+				if DEBUG {
+					fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v File=%v\n",
+						reply.ProgramType, reply.TaskID, reply.File)
+				}
 				go func(taskID int) {
 					time.Sleep(time.Second * 10)
 					c.mu.Lock()
@@ -52,7 +54,9 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				return nil
 			}
 		}
+
 		fmt.Println("[GetTask]: Please Wait For Map Tasks")
+
 		reply.PleaseWait = true
 		return nil
 	}
@@ -64,24 +68,29 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				reply.TaskID = i
 				reply.NumMap = len(c.files)
 				c.assignedReduceTasks[i] = true
-				fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v\n", reply.ProgramType, reply.TaskID)
+				if DEBUG {
+					fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v\n", reply.ProgramType, reply.TaskID)
+				}
 				go func(taskID int) {
 					time.Sleep(time.Second * 10)
 					c.mu.Lock()
 					defer c.mu.Unlock()
-					if !c.assignedReduceTasks[taskID] {
+					if !c.completedReduceTasks[taskID] {
 						c.assignedReduceTasks[taskID] = false
 					}
 				}(i)
 				return nil
 			}
 		}
+
 		fmt.Println("[GetTask]: Please Wait For Reduce Tasks")
+
 		reply.PleaseWait = true
 		return nil
 	}
-
-	fmt.Println("[GetTask]: Please Exit")
+	if DEBUG {
+		fmt.Println("[GetTask]: Please Exit")
+	}
 	reply.PleaseExit = true
 
 	return nil
@@ -89,18 +98,22 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 func (c *Coordinator) CompletedTask(args *CompletedTaskArgs, reply *CompletedTaskReply) error {
 	taskID, programType := args.TaskID, args.ProgramType
-	fmt.Printf("[CompletedTask]: ProgramType=%v TaskID=%v\n", programType, taskID)
+	if DEBUG {
+		fmt.Printf("[CompletedTask]: ProgramType=%v TaskID=%v\n", programType, taskID)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if programType == Map {
 		if !c.completedMapTasks[taskID] {
 			c.numCompletedMapTasks++
 		}
+		c.assignedMapTasks[taskID] = true
 		c.completedMapTasks[taskID] = true
 	} else {
 		if !c.completedReduceTasks[taskID] {
 			c.numCompletedReduceTasks++
 		}
+		c.assignedReduceTasks[taskID] = true
 		c.completedReduceTasks[taskID] = true
 	}
 	return nil
@@ -115,10 +128,10 @@ func (c *Coordinator) server() {
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
-	err = os.Remove(sockname)
-	if err != nil {
-		log.Fatal(err)
-	}
+	_ = os.Remove(sockname)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
@@ -129,6 +142,9 @@ func (c *Coordinator) server() {
 // Done is called by main/mrcoordinator.go periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.numCompletedMapTasks == c.nMap && c.numCompletedReduceTasks == c.nReduce {
 		fmt.Println("All done.")
 		return true

@@ -16,6 +16,8 @@ import (
 const (
 	intermediateFileNameFormat = "mr-%v-%v"
 	outputFileNameFormat       = "mr-out-%v"
+
+	DEBUG = false
 )
 
 type KeyValue struct {
@@ -42,21 +44,29 @@ func ihash(key string) int {
 
 // Worker is called by main/mrworker.go
 func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []string) string) {
+	workerID := os.Getpid()
+	fmt.Printf("%v Started\n", workerID)
+
 	for {
 		filename, programType, taskID, nReduce, nMap, pleaseWait, pleaseExit := CallGetTask()
 		if pleaseExit {
-			fmt.Println("Exiting.")
+			fmt.Printf("%v Exiting.\n", workerID)
 			os.Exit(0)
 		}
 
 		if pleaseWait {
-			fmt.Println("Waiting.")
+			fmt.Printf("%v Waiting.\n", workerID)
 			time.Sleep(time.Second * 1)
 			continue
 		}
 
 		if programType == Map {
-			fmt.Printf("Received task: ProgramType=%v TaskID=%v Filename=%v\n", programType, taskID, filename)
+			if DEBUG {
+				fmt.Printf(
+					"%v Received task: ProgramType=%v TaskID=%v Filename=%v\n",
+					workerID, programType, taskID, filename,
+				)
+			}
 			file, err := os.Open(filename)
 			if err != nil {
 				log.Fatalf("cannot open %v", filename)
@@ -70,7 +80,7 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 				log.Fatal(err)
 			}
 			intermediate := mapFunc(filename, string(content))
-			fmt.Println(intermediate)
+			//fmt.Println(intermediate)
 			outputFiles := make([]*os.File, nReduce)
 			for i := range outputFiles {
 				outputFileName := fmt.Sprintf(intermediateFileNameFormat, taskID, i)
@@ -107,7 +117,12 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 			}
 			CallCompletedTask(taskID, programType)
 		} else {
-			fmt.Printf("Received task: ProgramType=%v TaskID=%v\n", programType, taskID)
+			if DEBUG {
+				fmt.Printf(
+					"%v Received task: ProgramType=%v TaskID=%v\n",
+					workerID, programType, taskID,
+				)
+			}
 			KVs := make([]KeyValue, 0)
 
 			for i := 0; i < nMap; i++ {
@@ -209,6 +224,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	log.Fatal(err)
 	return false
 }
