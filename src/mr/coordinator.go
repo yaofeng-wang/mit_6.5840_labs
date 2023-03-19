@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
@@ -24,8 +25,6 @@ type Coordinator struct {
 	assignedReduceTasks     []bool
 	completedReduceTasks    []bool
 	numCompletedReduceTasks int
-
-	timeout chan int
 }
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
@@ -42,6 +41,14 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				c.assignedMapTasks[i] = true
 				fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v File=%v\n",
 					reply.ProgramType, reply.TaskID, reply.File)
+				go func(taskID int) {
+					time.Sleep(time.Second * 10)
+					c.mu.Lock()
+					defer c.mu.Unlock()
+					if !c.completedMapTasks[taskID] {
+						c.assignedMapTasks[taskID] = false
+					}
+				}(i)
 				return nil
 			}
 		}
@@ -58,6 +65,14 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				reply.NumMap = len(c.files)
 				c.assignedReduceTasks[i] = true
 				fmt.Printf("[GetTask]: ProgramType=%v TaskID=%v\n", reply.ProgramType, reply.TaskID)
+				go func(taskID int) {
+					time.Sleep(time.Second * 10)
+					c.mu.Lock()
+					defer c.mu.Unlock()
+					if !c.assignedReduceTasks[taskID] {
+						c.assignedReduceTasks[taskID] = false
+					}
+				}(i)
 				return nil
 			}
 		}
@@ -93,11 +108,17 @@ func (c *Coordinator) CompletedTask(args *CompletedTaskArgs, reply *CompletedTas
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
-	rpc.Register(c)
+	err := rpc.Register(c)
+	if err != nil {
+		log.Fatal(err)
+	}
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
-	os.Remove(sockname)
+	err = os.Remove(sockname)
+	if err != nil {
+		log.Fatal(err)
+	}
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
@@ -129,7 +150,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 	c.assignedReduceTasks = make([]bool, c.nReduce)
 	c.completedReduceTasks = make([]bool, c.nReduce)
-	c.timeout = make(chan int)
 
 	c.server()
 	return &c

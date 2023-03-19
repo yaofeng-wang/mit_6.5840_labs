@@ -8,11 +8,16 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
 
-// Map functions return a slice of KeyValue.
+const (
+	intermediateFileNameFormat = "mr-%v-%v"
+	outputFileNameFormat       = "mr-out-%v"
+)
+
 type KeyValue struct {
 	Key   string
 	Value string
@@ -28,7 +33,10 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
 	h := fnv.New32a()
-	h.Write([]byte(key))
+	_, err := h.Write([]byte(key))
+	if err != nil {
+		log.Fatal(err)
+	}
 	return int(h.Sum32() & 0x7fffffff)
 }
 
@@ -38,7 +46,7 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 		filename, programType, taskID, nReduce, nMap, pleaseWait, pleaseExit := CallGetTask()
 		if pleaseExit {
 			fmt.Println("Exiting.")
-			os.Exit(1)
+			os.Exit(0)
 		}
 
 		if pleaseWait {
@@ -52,20 +60,24 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 			file, err := os.Open(filename)
 			if err != nil {
 				log.Fatalf("cannot open %v", filename)
-				os.Exit(1)
 			}
 			content, err := io.ReadAll(file)
 			if err != nil {
 				log.Fatalf("cannot read %v", filename)
-				os.Exit(1)
 			}
-			file.Close()
+			err = file.Close()
+			if err != nil {
+				log.Fatal(err)
+			}
 			intermediate := mapFunc(filename, string(content))
-
+			fmt.Println(intermediate)
 			outputFiles := make([]*os.File, nReduce)
 			for i := range outputFiles {
-				outputFileName := fmt.Sprintf("mr-%d-%d", taskID, i)
-				outputFile, _ := os.Create(outputFileName)
+				outputFileName := fmt.Sprintf(intermediateFileNameFormat, taskID, i)
+				outputFile, err := os.CreateTemp("", outputFileName)
+				if err != nil {
+					log.Fatal(err)
+				}
 				outputFiles[i] = outputFile
 			}
 
@@ -75,12 +87,23 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 				outputKV[reduceTaskID] = append(outputKV[reduceTaskID], kv)
 			}
 
+			//fmt.Println(outputKV)
+			path, _ := os.Getwd()
 			for i := range outputKV {
 				enc := json.NewEncoder(outputFiles[i])
-				for _, kv := range outputKV {
-					enc.Encode(kv)
+				err = enc.Encode(&outputKV[i])
+				if err != nil {
+					log.Fatal(err)
 				}
-				outputFiles[i].Close()
+				err = outputFiles[i].Close()
+				if err != nil {
+					log.Fatal(err)
+				}
+				err = os.Rename(outputFiles[i].Name(),
+					filepath.Join(path, fmt.Sprintf(intermediateFileNameFormat, taskID, i)))
+				if err != nil {
+					log.Fatal(err)
+				}
 			}
 			CallCompletedTask(taskID, programType)
 		} else {
@@ -88,11 +111,10 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 			KVs := make([]KeyValue, 0)
 
 			for i := 0; i < nMap; i++ {
-				filename := fmt.Sprintf("mr-%v-%v", i, taskID)
+				filename := fmt.Sprintf(intermediateFileNameFormat, i, taskID)
 				file, err := os.Open(filename)
 				if err != nil {
 					log.Fatal(err)
-					os.Exit(1)
 				}
 				dec := json.NewDecoder(file)
 				for {
@@ -106,11 +128,17 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 					//fmt.Println(kvs)
 					KVs = append(KVs, kvs...)
 				}
-				file.Close()
+				err = file.Close()
+				if err != nil {
+					log.Fatal(err)
+				}
 			}
 
-			outputFileName := fmt.Sprintf("mr-out-%d", taskID)
-			outputFile, _ := os.Create(outputFileName)
+			outputFileName := fmt.Sprintf(outputFileNameFormat, taskID)
+			outputFile, err := os.CreateTemp("", outputFileName)
+			if err != nil {
+				log.Fatal(err)
+			}
 			sort.Sort(ByKey(KVs))
 			i := 0
 			for i < len(KVs) {
@@ -118,13 +146,24 @@ func Worker(mapFunc func(string, string) []KeyValue, reduceFunc func(string, []s
 				for j < len(KVs) && KVs[j].Key == KVs[i].Key {
 					j++
 				}
-				values := []string{}
+				var values []string
 				for k := i; k < j; k++ {
 					values = append(values, KVs[k].Value)
 				}
 				output := reduceFunc(KVs[i].Key, values)
-				fmt.Fprintf(outputFile, "%v %v\n", KVs[i].Key, output)
+				_, err = fmt.Fprintf(outputFile, "%v %v\n", KVs[i].Key, output)
+				if err != nil {
+					log.Fatal(err)
+				}
 				i = j
+			}
+			path, err := os.Getwd()
+			if err != nil {
+				log.Fatal(err)
+			}
+			err = os.Rename(outputFile.Name(), filepath.Join(path, outputFileName))
+			if err != nil {
+				log.Fatal(err)
 			}
 			CallCompletedTask(taskID, programType)
 		}
@@ -137,8 +176,7 @@ func CallGetTask() (filename string, programType ProgramType,
 	reply := GetTaskReply{}
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
-		fmt.Println("call failed!")
-		os.Exit(1)
+		log.Fatal("call failed!")
 	}
 	return reply.File, reply.ProgramType, reply.TaskID, reply.NumReduce, reply.NumMap, reply.PleaseWait, reply.PleaseExit
 }
@@ -150,8 +188,7 @@ func CallCompletedTask(taskID int, programType ProgramType) {
 	reply := CompletedTaskReply{}
 	ok := call("Coordinator.CompletedTask", &args, &reply)
 	if !ok {
-		fmt.Println("call failed!")
-		os.Exit(1)
+		log.Fatal("call failed!")
 	}
 }
 
