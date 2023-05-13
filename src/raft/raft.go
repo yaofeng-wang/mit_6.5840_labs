@@ -18,8 +18,6 @@ package raft
 //
 
 import (
-	//	"bytes"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,61 +79,12 @@ type Raft struct {
 	nextIndices  []int
 	matchIndices []int
 
-	heartbeatCh chan *int
-	applyCh     chan ApplyMsg
+	heartbeatCh   chan struct{}
+	applyCh       chan ApplyMsg
+	startElection bool
 
 	// for debugging
 	startTime time.Time
-}
-
-// TODO send request in parallel
-func (rf *Raft) sendHeartbeats() {
-	for rf.killed() == false {
-
-		for i, _ := range rf.peers {
-			if i == rf.me {
-				continue
-			}
-
-			if !rf.isLeader() || rf.killed() {
-				return
-			}
-
-			rf.mu.Lock()
-			// TODO update other fields
-			args := &AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: 0,
-				PrevLogTerm:  0,
-				Entries:      []logEntry{},
-				LeaderCommit: rf.commitIndex,
-			}
-			reply := &AppendEntriesReply{}
-			rf.mu.Unlock()
-
-			go func(index int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-				if !rf.sendAppendEntries(index, args, reply) {
-					return
-				}
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				if reply.Term > rf.currentTerm {
-					rf.state = follower
-					rf.currentTerm = reply.Term
-					rf.votedFor = nil
-					DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
-					go rf.ticker()
-				}
-			}(i, args, reply)
-
-		}
-		time.Sleep(heartbeatInterval)
-	}
-}
-
-func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(400+rand.Int63()%1000) * time.Millisecond
 }
 
 // GetState return currentTerm and whether this server
@@ -227,6 +176,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+
 }
 
 func (rf *Raft) killed() bool {
@@ -234,48 +184,53 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) startElection(hasLeaderWithLargerTermCh chan int) {
-	for {
-		if rf.killed() {
-			return
-		}
-		DPrintf("%d %d starts election", MillisecondsPassed(rf.startTime), rf.me)
-		rf.becomeCandidate()
-		select {
-		case newTerm := <-rf.heartbeatCh:
-			rf.becomeFollower(newTerm)
-			go rf.ticker()
-			return
-		case newTerm := <-hasLeaderWithLargerTermCh:
-			rf.becomeFollower(&newTerm)
-			go rf.ticker()
-			return
-		case <-rf.getVotes(hasLeaderWithLargerTermCh):
-			rf.becomeLeader()
-			go rf.sendHeartbeats()
-			return
-		case <-time.After(rf.getElectionTimeout()):
-		}
-	}
-}
+//func (rf *Raft) startElection(hasLeaderWithLargerTermCh chan int) {
+//	for {
+//		if rf.killed() {
+//			return
+//		}
+//		DPrintf("%d %d starts election", MillisecondsPassed(rf.startTime), rf.me)
+//		select {
+//		case newTerm := <-rf.heartbeatCh:
+//			rf.becomeFollower(newTerm)
+//			go rf.ticker()
+//			return
+//		//case newTerm := <-hasLeaderWithLargerTermCh:
+//		//	rf.becomeFollower(&newTerm)
+//		//	go rf.ticker()
+//		//	return
+//		case <-rf.getVotes(hasLeaderWithLargerTermCh):
+//			rf.becomeLeader()
+//			go rf.sendHeartbeats()
+//			return
+//		case <-time.After(rf.getElectionTimeout()):
+//		}
+//	}
+//}
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		hasLeaderWithLargerTermCh := make(chan int)
 		select {
-		case newTerm := <-rf.heartbeatCh:
-			DPrintf("%d %d received heartbeat", MillisecondsPassed(rf.startTime), rf.me)
-			rf.becomeFollower(newTerm)
 		case <-time.After(rf.getElectionTimeout()):
-			if rf.isFollower() {
-				rf.startElection(hasLeaderWithLargerTermCh)
+			if rf.killed() {
 				return
 			}
-		case <-hasLeaderWithLargerTermCh:
-			return
+			rf.mu.Lock()
+			if rf.state == follower {
+				rf.state = candidate
+			}
+
+			if rf.state == candidate {
+				rf.currentTerm++
+				rf.votedFor = &rf.me
+				go rf.requestVotes()
+			}
+			rf.mu.Unlock()
+		case <-rf.heartbeatCh:
+
 		}
 	}
 	DPrintf("%d %d killed", MillisecondsPassed(rf.startTime), rf.me)
@@ -299,7 +254,7 @@ func MakeRaft(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.startTime = startTime
-	rf.heartbeatCh = make(chan *int, 1)
+	rf.heartbeatCh = make(chan struct{})
 	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash

@@ -40,20 +40,33 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = follower
 		rf.currentTerm = args.Term
 		rf.votedFor = nil
-		DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
+		//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
 	}
 
-	if (rf.votedFor == nil || *rf.votedFor == args.CandidateId) && args.LastLogIndex >= len(rf.logs) {
-		reply.VoteGranted = true
-		DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
-		return
+	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
+		// check if candidate is at least as up-to-date
+		if len(rf.logs) == 0 || args.LastLogTerm > rf.logs[len(rf.logs)-1].Term {
+			reply.VoteGranted = true
+			rf.votedFor = &args.CandidateId
+			rf.heartbeatCh <- struct{}{}
+			DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
+			return
+		}
+
+		if args.LastLogIndex >= len(rf.logs) {
+			reply.VoteGranted = true
+			rf.votedFor = &args.CandidateId
+			rf.heartbeatCh <- struct{}{}
+			DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
+			return
+		}
 	}
-	DPrintf("%d %d at term=%d did not vote for %d, already voted for %d",
-		MillisecondsPassed(rf.startTime),
-		rf.me,
-		rf.currentTerm,
-		args.CandidateId,
-		*rf.votedFor)
+	//DPrintf("%d %d at term=%d did not vote for %d, already voted for %d",
+	//	MillisecondsPassed(rf.startTime),
+	//	rf.me,
+	//	rf.currentTerm,
+	//	args.CandidateId,
+	//	*rf.votedFor)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -88,16 +101,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) getVotes(hasLeaderWithLargerTermCh chan<- int) <-chan struct{} {
-	votesCh := rf.requestVotes(hasLeaderWithLargerTermCh)
-	gotMajorityVotesCh := rf.aggregateVotes(votesCh)
-	return gotMajorityVotesCh
-}
-
 // requestVote sends requests to peers in parallel.
-func (rf *Raft) requestVotes(hasLeaderWithLargerTermCh chan<- int) chan int {
-	votesCh := make(chan int, 1)
-	votesCh <- 1
+func (rf *Raft) requestVotes() {
+	numVotes := 1
+	rf.mu.Lock()
+	voteTerm := rf.currentTerm
+	DPrintf("%d %d starts election at term=%v", MillisecondsPassed(rf.startTime), rf.me, voteTerm)
+	rf.mu.Unlock()
+
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -105,7 +116,7 @@ func (rf *Raft) requestVotes(hasLeaderWithLargerTermCh chan<- int) chan int {
 
 		rf.mu.Lock()
 		args := &RequestVoteArgs{
-			Term:         rf.currentTerm,
+			Term:         voteTerm,
 			CandidateId:  rf.me,
 			LastLogIndex: len(rf.logs),
 		}
@@ -116,35 +127,25 @@ func (rf *Raft) requestVotes(hasLeaderWithLargerTermCh chan<- int) chan int {
 		rf.mu.Unlock()
 
 		go func(index int, args *RequestVoteArgs, reply *RequestVoteReply) {
-			rf.sendRequestVote(index, args, reply)
+			if success := rf.sendRequestVote(index, args, reply); !success {
+				return
+			}
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if reply.Term > rf.currentTerm {
-				hasLeaderWithLargerTermCh <- reply.Term
+				rf.currentTerm = reply.Term
+				rf.votedFor = nil
+				rf.state = follower
+				return
 			}
 			if reply.VoteGranted {
-				DPrintf("%d %d got 1 vote from %d", MillisecondsPassed(rf.startTime), rf.me, index)
-				votesCh <- 1
+				numVotes++
+			}
+			if rf.state != leader && (numVotes<<1) > len(rf.peers) && rf.currentTerm == voteTerm {
+				rf.state = leader
+				DPrintf("%d %d becomes leader at term=%v, numVotes=%v, len(rf.peers)=%v", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm, numVotes, len(rf.peers))
+				go rf.sendHeartbeats()
 			}
 		}(i, args, reply)
 	}
-	return votesCh
-}
-
-func (rf *Raft) aggregateVotes(votesCh chan int) chan struct{} {
-	gotMajorityVotesCh := make(chan struct{})
-
-	go func() {
-		numVotes := 0
-		for i := range votesCh {
-			numVotes += i
-			if (numVotes << 1) > len(rf.peers) {
-				DPrintf("%d %d got majority votes", MillisecondsPassed(rf.startTime), rf.me)
-				close(gotMajorityVotesCh)
-				return
-			}
-		}
-	}()
-
-	return gotMajorityVotesCh
 }
