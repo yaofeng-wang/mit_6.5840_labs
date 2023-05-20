@@ -93,8 +93,13 @@ func (rf *Raft) sendHeartbeats() {
 				LeaderId:     rf.me,
 				LeaderCommit: rf.commitIndex,
 			}
+			DPrintf("%d %d nextIndices[%v]=%v", MillisecondsPassed(rf.startTime), rf.me, i, rf.nextIndices[i])
 			if isFirstHeartbeat || (len(rf.logs) > 0 && rf.logs[len(rf.logs)-1].Term != rf.currentTerm) {
 				isFirstHeartbeat = false
+				args.PrevLogIndex = rf.commitIndex
+				if args.PrevLogIndex > 0 {
+					args.PrevLogTerm = rf.logs[args.PrevLogIndex-1].Term
+				}
 			} else if len(rf.logs) >= rf.nextIndices[i] {
 				args.PrevLogIndex = rf.nextIndices[i] - 1
 				if args.PrevLogIndex != 0 {
@@ -107,7 +112,8 @@ func (rf *Raft) sendHeartbeats() {
 			rf.mu.Unlock()
 
 			go func(index int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-				for numTries := 0; numTries < 3; numTries++ {
+
+				for true {
 					if success := rf.sendAppendEntries(index, args, reply); !success {
 						return
 					}
@@ -119,7 +125,6 @@ func (rf *Raft) sendHeartbeats() {
 						rf.votedFor = nil
 						rf.mu.Unlock()
 						return
-						//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
 					}
 
 					if reply.Success {
@@ -148,7 +153,18 @@ func (rf *Raft) sendHeartbeats() {
 						rf.mu.Unlock()
 						break
 					} else {
-						rf.nextIndices[index]--
+						rf.nextIndices[index] = min(rf.nextIndices[index], 1)
+						args.PrevLogIndex = rf.nextIndices[index] - 1
+						if args.PrevLogIndex > 0 {
+							args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+						}
+
+						i := len(rf.logs)
+						for i > 0 && rf.logs[i-1].Term != rf.currentTerm && rf.commitIndex < i {
+							i--
+						}
+						args.Entries = rf.logs[args.PrevLogIndex:i]
+
 						rf.mu.Unlock()
 					}
 				}

@@ -53,7 +53,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 
-		if args.LastLogIndex >= len(rf.logs) {
+		if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= len(rf.logs) {
 			reply.VoteGranted = true
 			rf.votedFor = &args.CandidateId
 			rf.heartbeatCh <- struct{}{}
