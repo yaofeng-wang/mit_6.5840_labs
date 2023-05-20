@@ -53,7 +53,7 @@ const (
 
 type logEntry struct {
 	Term    int
-	Command []byte
+	Command interface{}
 }
 
 // Raft A Go object implementing a single Raft peer.
@@ -161,6 +161,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != leader {
+		return index, term, false
+	}
+	index = len(rf.logs) + 1
+	rf.logs = append(rf.logs, logEntry{Term: rf.currentTerm, Command: command})
+	term = rf.currentTerm
+	DPrintf("%d %d received new log at index=%v", MillisecondsPassed(rf.startTime), rf.me, index)
 	return index, term, isLeader
 }
 
@@ -183,30 +192,6 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
-
-//func (rf *Raft) startElection(hasLeaderWithLargerTermCh chan int) {
-//	for {
-//		if rf.killed() {
-//			return
-//		}
-//		DPrintf("%d %d starts election", MillisecondsPassed(rf.startTime), rf.me)
-//		select {
-//		case newTerm := <-rf.heartbeatCh:
-//			rf.becomeFollower(newTerm)
-//			go rf.ticker()
-//			return
-//		//case newTerm := <-hasLeaderWithLargerTermCh:
-//		//	rf.becomeFollower(&newTerm)
-//		//	go rf.ticker()
-//		//	return
-//		case <-rf.getVotes(hasLeaderWithLargerTermCh):
-//			rf.becomeLeader()
-//			go rf.sendHeartbeats()
-//			return
-//		case <-time.After(rf.getElectionTimeout()):
-//		}
-//	}
-//}
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
@@ -264,6 +249,24 @@ func MakeRaft(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applyToStateMachine()
 
 	return rf
+}
+
+func (rf *Raft) applyToStateMachine() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[rf.lastApplied-1].Command,
+				CommandIndex: rf.lastApplied,
+			}
+			DPrintf("%d %d applied log index=%v", MillisecondsPassed(rf.startTime), rf.me, rf.lastApplied)
+		}
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
 }

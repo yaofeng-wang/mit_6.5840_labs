@@ -35,26 +35,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if args.PrevLogIndex > 0 {
-		if len(rf.logs) <= args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex-1].Term {
-			return
+	defer func() {
+		rf.heartbeatCh <- struct{}{}
+	}()
+	if args.PrevLogIndex > 0 &&
+		(len(rf.logs) < args.PrevLogIndex || args.PrevLogTerm != rf.logs[args.PrevLogIndex-1].Term) {
+		return
+	}
+
+	for i, entry := range args.Entries {
+		logIndex := i + args.PrevLogIndex + 1
+		if len(rf.logs) >= logIndex && rf.logs[logIndex-1].Term != entry.Term {
+			rf.logs = rf.logs[:logIndex-1]
+			break
 		}
 	}
 
-	// TODO assumed length of Entries is always 1
-	//if len(args.Entries) == 1 &&
-	//	len(rf.logs) >= args.PrevLogIndex+1 &&
-	//	rf.logs[args.PrevLogIndex].Term != args.Entries[0].Term {
-	//	rf.logs = rf.logs[:args.PrevLogIndex+1]
-	//}
-	//
-	//rf.logs = append(rf.logs, args.Entries...)
-	//
-	//if args.LeaderCommit > rf.commitIndex {
-	//	rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
-	//}
+	for i := range args.Entries {
+		logIndex := i + args.PrevLogIndex + 1
+		if logIndex > len(rf.logs) {
+			rf.logs = append(rf.logs, args.Entries[i:]...)
+			break
+		}
+	}
 
-	rf.heartbeatCh <- struct{}{}
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
+	}
+
 	reply.Success = true
 }
 
@@ -68,10 +76,9 @@ func (rf *Raft) getElectionTimeout() time.Duration {
 }
 
 func (rf *Raft) sendHeartbeats() {
+	isFirstHeartbeat := true
 	for !rf.killed() {
-
 		for i, _ := range rf.peers {
-
 			if i == rf.me {
 				continue
 			}
@@ -81,32 +88,71 @@ func (rf *Raft) sendHeartbeats() {
 				rf.mu.Unlock()
 				return
 			}
-			// TODO update other fields
 			args := &AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: 0,
-				PrevLogTerm:  0,
-				Entries:      []logEntry{},
 				LeaderCommit: rf.commitIndex,
 			}
+			if isFirstHeartbeat || (len(rf.logs) > 0 && rf.logs[len(rf.logs)-1].Term != rf.currentTerm) {
+				isFirstHeartbeat = false
+			} else if len(rf.logs) >= rf.nextIndices[i] {
+				args.PrevLogIndex = rf.nextIndices[i] - 1
+				if args.PrevLogIndex != 0 {
+					args.PrevLogTerm = rf.logs[args.PrevLogIndex-1].Term
+				}
+				args.Entries = rf.logs[args.PrevLogIndex:]
+			}
+
 			reply := &AppendEntriesReply{}
 			rf.mu.Unlock()
 
 			go func(index int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-				if success := rf.sendAppendEntries(index, args, reply); !success {
-					return
-				}
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				for numTries := 0; numTries < 3; numTries++ {
+					if success := rf.sendAppendEntries(index, args, reply); !success {
+						return
+					}
+					rf.mu.Lock()
 
-				if reply.Term > rf.currentTerm {
-					rf.state = follower
-					rf.currentTerm = reply.Term
-					rf.votedFor = nil
-					return
-					//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
+					if reply.Term > rf.currentTerm {
+						rf.state = follower
+						rf.currentTerm = reply.Term
+						rf.votedFor = nil
+						rf.mu.Unlock()
+						return
+						//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
+					}
+
+					if reply.Success {
+						rf.matchIndices[index] = max(rf.matchIndices[index], args.PrevLogIndex+len(args.Entries))
+						rf.nextIndices[index] = rf.matchIndices[index] + 1
+
+						origCommitIndex := rf.commitIndex
+						for i := rf.commitIndex + 1; i <= rf.matchIndices[index]; i++ {
+							count := 1
+							for j := range rf.peers {
+								if j == rf.me {
+									continue
+								}
+								if rf.matchIndices[j] >= i {
+									count++
+								}
+							}
+							if ((count << 1) > len(rf.peers)) && (rf.logs[i-1].Term == rf.currentTerm) {
+								rf.commitIndex = i
+							}
+						}
+						if origCommitIndex != rf.commitIndex {
+							DPrintf("%d %d commitIndex=%v", MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex)
+						}
+
+						rf.mu.Unlock()
+						break
+					} else {
+						rf.nextIndices[index]--
+						rf.mu.Unlock()
+					}
 				}
+
 			}(i, args, reply)
 		}
 		time.Sleep(heartbeatInterval)

@@ -81,7 +81,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	cfg.rafts = make([]*Raft, cfg.n)
 	cfg.connected = make([]bool, cfg.n)
 	cfg.saved = make([]*Persister, cfg.n)
-	cfg.endnames = make([][]string, cfg.n)
+	cfg.endnames = make([][]string, cfg.n) // give each client a name, endnames[i][j] stores the client name for the i-th server to call j-th server
 	cfg.logs = make([]map[int]interface{}, cfg.n)
 	cfg.lastApplied = make([]int, cfg.n)
 	cfg.start = time.Now()

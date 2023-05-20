@@ -143,6 +143,11 @@ func (rf *Raft) requestVotes() {
 			}
 			if rf.state != leader && (numVotes<<1) > len(rf.peers) && rf.currentTerm == voteTerm {
 				rf.state = leader
+				rf.nextIndices = make([]int, len(rf.peers))
+				for i := range rf.nextIndices {
+					rf.nextIndices[i] = len(rf.logs) + 1
+				}
+				rf.matchIndices = make([]int, len(rf.peers))
 				DPrintf("%d %d becomes leader at term=%v, numVotes=%v, len(rf.peers)=%v", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm, numVotes, len(rf.peers))
 				go rf.sendHeartbeats()
 			}
