@@ -108,12 +108,12 @@ func (rf *Raft) sendHeartbeats() {
 				args.Entries = rf.logs[args.PrevLogIndex:]
 			}
 
-			reply := &AppendEntriesReply{}
 			rf.mu.Unlock()
 
-			go func(index int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+			go func(index int, args *AppendEntriesArgs) {
 
-				for true {
+				for ii := 0; ii < 9; ii++ {
+					reply := &AppendEntriesReply{}
 					if success := rf.sendAppendEntries(index, args, reply); !success {
 						return
 					}
@@ -166,10 +166,11 @@ func (rf *Raft) sendHeartbeats() {
 						args.Entries = rf.logs[args.PrevLogIndex:i]
 
 						rf.mu.Unlock()
+						time.Sleep(10 * time.Millisecond)
 					}
 				}
 
-			}(i, args, reply)
+			}(i, args)
 		}
 		time.Sleep(heartbeatInterval)
 	}
