@@ -27,13 +27,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf("%d %d receives AppendEntries: term= %v args=%+v", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args)
-
+	DPrintf("%d %d receives AppendEntries: term=%v args=%+v", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args)
+	DPrintf("%d %d receives AppendEntries: len(rf.Logs)=%v, rf.commitIndex=%v", MillisecondsPassed(rf.startTime), rf.me, len(rf.Logs), rf.commitIndex)
 	if args.Term > rf.CurrentTerm {
 		rf.state = follower
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = nil
-
 	}
 	reply.Term = rf.CurrentTerm
 
@@ -53,11 +52,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		} else if args.PrevLogTerm != rf.Logs[args.PrevLogIndex-1].Term {
 			reply.XTerm = rf.Logs[args.PrevLogIndex-1].Term
-			i := args.PrevLogIndex
-			for i > 0 && rf.Logs[i-1].Term == args.PrevLogTerm {
-				i--
+			firstEntryOfTerm := 1
+			for i := 0; i-1 < len(rf.Logs); i++ {
+				if rf.Logs[i].Term == reply.XTerm {
+					firstEntryOfTerm = i + 1
+					break
+				}
 			}
-			reply.XIndex = i
+			reply.XIndex = firstEntryOfTerm
+			reply.XLen = len(rf.Logs)
 			DPrintf("%d %d conflict at PrevLog XTerm=%v, XIndex=%v",
 				MillisecondsPassed(rf.startTime),
 				rf.me,
@@ -195,29 +198,59 @@ func (rf *Raft) sendHeartbeats() {
 						//}
 						//args.Entries = rf.Logs[args.PrevLogIndex:i]
 
-						firstEntryWithTerm := 0
-						for i := len(rf.Logs) - 1; i >= 0 && rf.Logs[i].Term >= reply.XTerm; i-- {
-							if rf.Logs[i].Term == reply.XTerm {
-								firstEntryWithTerm = i + 1
-							}
+						//firstEntryWithTerm := 1
+						//for i := len(rf.Logs); i-1 >= 0 && rf.Logs[i-1].Term > reply.XTerm; i-- {
+						//	if rf.Logs[i-1].Term == reply.XTerm {
+						//		firstEntryWithTerm = i
+						//	}
+						//}
+
+						//if reply.XTerm != 0 && firstEntryWithTerm == 1 {
+						//	DPrintf(
+						//		"%d %d retry appendEntries index=%v, no entry with Term",
+						//		MillisecondsPassed(rf.startTime), rf.me, index)
+						//	rf.nextIndices[index] = min(rf.nextIndices[index], reply.XIndex)
+						//} else if firstEntryWithTerm > 0 {
+						//	DPrintf(
+						//		"%d %d retry appendEntries index=%v, has entry with Term at=%v",
+						//		MillisecondsPassed(rf.startTime), rf.me, index, firstEntryWithTerm)
+						//	rf.nextIndices[index] = min(rf.nextIndices[index], firstEntryWithTerm)
+						//} else {
+						//	DPrintf(
+						//		"%d %d retry appendEntries index=%v, too short",
+						//		MillisecondsPassed(rf.startTime), rf.me, index)
+						//	rf.nextIndices[index] = min(rf.nextIndices[index], reply.XLen)
+						//}
+
+						lastEntryWithSmallerTerm := 1
+						for i := 0; i < reply.XIndex && rf.Logs[i].Term < reply.XTerm; i++ {
+							lastEntryWithSmallerTerm = i + 1
 						}
 
-						if reply.XTerm != 0 && firstEntryWithTerm == 0 {
-							rf.nextIndices[index] = reply.XIndex
-						} else if firstEntryWithTerm > 0 {
-							rf.nextIndices[index] = firstEntryWithTerm
-						} else {
-							rf.nextIndices[index] = max(reply.XLen, 1)
-						}
+						rf.nextIndices[index] = min(rf.nextIndices[index], lastEntryWithSmallerTerm)
 						rf.nextIndices[index] = max(rf.nextIndices[index], 1)
-						args.PrevLogIndex = rf.nextIndices[index] - 1
 
+						args.PrevLogIndex = rf.nextIndices[index] - 1
+						if args.PrevLogIndex > 0 {
+							args.PrevLogTerm = rf.Logs[args.PrevLogIndex-1].Term
+						}
 						j := len(rf.Logs)
 						for j > rf.commitIndex && rf.Logs[j-1].Term != rf.CurrentTerm {
 							j--
 						}
 						args.Entries = rf.Logs[args.PrevLogIndex:j]
+						args.LeaderCommit = rf.commitIndex
 
+						DPrintf(
+							"%d %d retry appendEntries index=%v, reply.XIndex=%v, "+
+								"reply.XTerm=%v, PrevLogIndex=%v, PrevLogTerm=%v",
+							MillisecondsPassed(rf.startTime),
+							rf.me,
+							index,
+							reply.XIndex,
+							reply.XTerm,
+							args.PrevLogIndex,
+							args.PrevLogTerm)
 						rf.mu.Unlock()
 						time.Sleep(10 * time.Millisecond)
 					}
