@@ -18,10 +18,12 @@ package raft
 //
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"6_5840/labgob"
 	//	"6_5840/labgob"
 	"6_5840/labrpc"
 )
@@ -68,9 +70,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	currentTerm int
-	votedFor    *int
-	logs        []logEntry
+	PersistentState
 
 	commitIndex int
 	lastApplied int
@@ -87,12 +87,18 @@ type Raft struct {
 	startTime time.Time
 }
 
+type PersistentState struct {
+	CurrentTerm int
+	VotedFor    *int
+	Logs        []logEntry
+}
+
 // GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.currentTerm, rf.state == leader
+	return rf.CurrentTerm, rf.state == leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -104,13 +110,11 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.PersistentState)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -119,18 +123,14 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var persistentState PersistentState
+	if d.Decode(&persistentState) != nil {
+		DPrintf("%d %d failed to read persistentState", MillisecondsPassed(rf.startTime), rf.me)
+	} else {
+		rf.PersistentState = persistentState
+	}
 }
 
 // Snapshot the service says it has created a snapshot that has
@@ -160,16 +160,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state != leader {
 		return index, term, false
 	}
-	index = len(rf.logs) + 1
-	rf.logs = append(rf.logs, logEntry{Term: rf.currentTerm, Command: command})
-	term = rf.currentTerm
+	index = len(rf.Logs) + 1
+	rf.Logs = append(rf.Logs, logEntry{Term: rf.CurrentTerm, Command: command})
+	term = rf.CurrentTerm
 	DPrintf("%d %d received new log at index=%v", MillisecondsPassed(rf.startTime), rf.me, index)
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -209,8 +209,9 @@ func (rf *Raft) ticker() {
 			}
 
 			if rf.state == candidate {
-				rf.currentTerm++
-				rf.votedFor = &rf.me
+				rf.CurrentTerm++
+				rf.persist()
+				rf.VotedFor = &rf.me
 				go rf.requestVotes()
 			}
 			rf.mu.Unlock()
@@ -261,7 +262,7 @@ func (rf *Raft) applyToStateMachine() {
 			rf.lastApplied++
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logs[rf.lastApplied-1].Command,
+				Command:      rf.Logs[rf.lastApplied-1].Command,
 				CommandIndex: rf.lastApplied,
 			}
 			DPrintf("%d %d applied log index=%v", MillisecondsPassed(rf.startTime), rf.me, rf.lastApplied)

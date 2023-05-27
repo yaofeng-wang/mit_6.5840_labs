@@ -23,39 +23,40 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	DPrintf("%d %d at term=%d received request vote args=%+v",
 		MillisecondsPassed(rf.startTime),
 		rf.me,
-		rf.currentTerm,
+		rf.CurrentTerm,
 		args)
 
-	if args.Term < rf.currentTerm {
+	if args.Term < rf.CurrentTerm {
 		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
+		reply.Term = rf.CurrentTerm
 		return
 	}
 
-	if args.Term > rf.currentTerm {
+	if args.Term > rf.CurrentTerm {
 		rf.state = follower
-		rf.currentTerm = args.Term
-		rf.votedFor = nil
-		//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm)
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = nil
+		//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm)
 	}
 
-	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
+	if rf.VotedFor == nil || *rf.VotedFor == args.CandidateId {
 		// check if candidate is at least as up-to-date
-		if len(rf.logs) == 0 || args.LastLogTerm > rf.logs[len(rf.logs)-1].Term {
+		if len(rf.Logs) == 0 || args.LastLogTerm > rf.Logs[len(rf.Logs)-1].Term {
 			reply.VoteGranted = true
-			rf.votedFor = &args.CandidateId
+			rf.VotedFor = &args.CandidateId
 			rf.heartbeatCh <- struct{}{}
 			DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
 			return
 		}
 
-		if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= len(rf.logs) {
+		if args.LastLogTerm == rf.Logs[len(rf.Logs)-1].Term && args.LastLogIndex >= len(rf.Logs) {
 			reply.VoteGranted = true
-			rf.votedFor = &args.CandidateId
+			rf.VotedFor = &args.CandidateId
 			rf.heartbeatCh <- struct{}{}
 			DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
 			return
@@ -64,9 +65,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//DPrintf("%d %d at term=%d did not vote for %d, already voted for %d",
 	//	MillisecondsPassed(rf.startTime),
 	//	rf.me,
-	//	rf.currentTerm,
+	//	rf.CurrentTerm,
 	//	args.CandidateId,
-	//	*rf.votedFor)
+	//	*rf.VotedFor)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -105,7 +106,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) requestVotes() {
 	numVotes := 1
 	rf.mu.Lock()
-	voteTerm := rf.currentTerm
+	voteTerm := rf.CurrentTerm
 	DPrintf("%d %d starts election at term=%v", MillisecondsPassed(rf.startTime), rf.me, voteTerm)
 	rf.mu.Unlock()
 
@@ -118,10 +119,10 @@ func (rf *Raft) requestVotes() {
 		args := &RequestVoteArgs{
 			Term:         voteTerm,
 			CandidateId:  rf.me,
-			LastLogIndex: len(rf.logs),
+			LastLogIndex: len(rf.Logs),
 		}
-		if len(rf.logs) > 0 {
-			args.LastLogTerm = rf.logs[len(rf.logs)-1].Term
+		if len(rf.Logs) > 0 {
+			args.LastLogTerm = rf.Logs[len(rf.Logs)-1].Term
 		}
 		reply := &RequestVoteReply{}
 		rf.mu.Unlock()
@@ -132,23 +133,25 @@ func (rf *Raft) requestVotes() {
 			}
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.votedFor = nil
+			defer rf.persist()
+
+			if reply.Term > rf.CurrentTerm {
+				rf.CurrentTerm = reply.Term
+				rf.VotedFor = nil
 				rf.state = follower
 				return
 			}
 			if reply.VoteGranted {
 				numVotes++
 			}
-			if rf.state != leader && (numVotes<<1) > len(rf.peers) && rf.currentTerm == voteTerm {
+			if rf.state != leader && (numVotes<<1) > len(rf.peers) && rf.CurrentTerm == voteTerm {
 				rf.state = leader
 				rf.nextIndices = make([]int, len(rf.peers))
 				for i := range rf.nextIndices {
-					rf.nextIndices[i] = len(rf.logs) + 1
+					rf.nextIndices[i] = len(rf.Logs) + 1
 				}
 				rf.matchIndices = make([]int, len(rf.peers))
-				DPrintf("%d %d becomes leader at term=%v, numVotes=%v, len(rf.peers)=%v", MillisecondsPassed(rf.startTime), rf.me, rf.currentTerm, numVotes, len(rf.peers))
+				DPrintf("%d %d becomes leader at term=%v, numVotes=%v, len(rf.peers)=%v", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, numVotes, len(rf.peers))
 				go rf.sendHeartbeats()
 			}
 		}(i, args, reply)
