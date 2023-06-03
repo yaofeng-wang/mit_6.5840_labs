@@ -125,7 +125,7 @@ func (rf *Raft) requestVotes() {
 				rf.state = leader
 				rf.nextIndices = make([]int, len(rf.peers))
 				for i := range rf.nextIndices {
-					rf.nextIndices[i] = rf.length() + 1
+					rf.nextIndices[i] = rf.lastLogIndex() + 1
 				}
 				rf.matchIndices = make([]int, len(rf.peers))
 				DPrintf("%d %d becomes leader at term=%v, numVotes=%v, len(rf.peers)=%v", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, numVotes, len(rf.peers))

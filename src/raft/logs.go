@@ -39,9 +39,36 @@ func (rf *Raft) lastLog() *logEntry {
 }
 
 func (rf *Raft) lastLogIndex() int {
+	// will return LastIncludedIndex if there is no logs, should always check if log isEmpty first.
 	return rf.LastIncludedIndex + len(rf.Logs)
+}
+
+func (rf *Raft) indexBeforeLastLog() int {
+	if rf.isEmpty() {
+		return rf.lastLogIndex()
+	}
+	return rf.lastLogIndex() - 1
 }
 
 func (rf *Raft) appendLogs(logEntry ...logEntry) {
 	rf.Logs = append(rf.Logs, logEntry...)
+}
+
+func (rf *Raft) deleteLogsFromIndex(logIndex int) {
+	// delete log at logIndex as well
+	rf.Logs = rf.Logs[:logIndex-rf.LastIncludedIndex]
+}
+
+func (rf *Raft) getFirstIndexWithTerm(term int) int {
+	firstIndex := rf.LastIncludedIndex + 1
+	for index := rf.lastLogIndex(); rf.hasLogAt(index); index-- {
+		if rf.logAt(index).Term == term {
+			firstIndex = index
+		}
+	}
+	return firstIndex
+}
+
+func (rf *Raft) logsFromIndex(logIndex int) Logs {
+	return rf.Logs[logIndex-rf.LastIncludedIndex-1:]
 }

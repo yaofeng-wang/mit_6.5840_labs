@@ -6,29 +6,24 @@ import (
 )
 
 type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      Logs
-	LeaderCommit int
+	Term, LeaderId, PrevLogIndex, PrevLogTerm, LeaderCommit int
+	Entries                                                 Logs
 }
 
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	XTerm  int
-	XIndex int
-	XLen   int
+	XTerm, XIndex, XLen int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf("%d %d receives AppendEntries: term=%v args=%+v", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args)
-	DPrintf("%d %d receives AppendEntries: len(rf.Logs)=%v, rf.commitIndex=%v", MillisecondsPassed(rf.startTime), rf.me, len(rf.Logs), rf.commitIndex)
+	DPrintf("%d %d receives AppendEntries: term=%v args=%+v rf.length()=%v rf.commitIndex=%v",
+		MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args, rf.length(), rf.commitIndex)
+
 	if args.Term > rf.CurrentTerm {
 		rf.state = follower
 		rf.CurrentTerm = args.Term
@@ -44,23 +39,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.heartbeatCh <- struct{}{}
 	}()
 	if args.PrevLogIndex > 0 {
-		if len(rf.Logs) < args.PrevLogIndex {
-			reply.XLen = len(rf.Logs)
+		if rf.length() < args.PrevLogIndex {
+			reply.XLen = rf.length()
 			DPrintf("%d %d logs too short XLen=%v", MillisecondsPassed(rf.startTime),
 				rf.me,
 				reply.XLen)
 			return
-		} else if args.PrevLogTerm != rf.Logs[args.PrevLogIndex-1].Term {
-			reply.XTerm = rf.Logs[args.PrevLogIndex-1].Term
+		} else if args.PrevLogTerm != rf.logAt(args.PrevLogIndex).Term {
+			reply.XTerm = rf.logAt(args.PrevLogIndex).Term
 			firstEntryOfTerm := 1
-			for i := 0; i-1 < len(rf.Logs); i++ {
-				if rf.Logs[i].Term == reply.XTerm {
+			for i := 0; i-1 < rf.length(); i++ {
+				if rf.logAt(i+1).Term == reply.XTerm {
 					firstEntryOfTerm = i + 1
 					break
 				}
 			}
 			reply.XIndex = firstEntryOfTerm
-			reply.XLen = len(rf.Logs)
+			reply.XLen = rf.length()
 			DPrintf("%d %d conflict at PrevLog XTerm=%v, XIndex=%v",
 				MillisecondsPassed(rf.startTime),
 				rf.me,
@@ -72,7 +67,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	for i, entry := range args.Entries {
 		logIndex := i + args.PrevLogIndex + 1
-		if len(rf.Logs) >= logIndex && rf.Logs[logIndex-1].Term != entry.Term {
+		if rf.length() >= logIndex && rf.logAt(logIndex).Term != entry.Term {
 			rf.Logs = rf.Logs[:logIndex-1]
 			break
 		}
@@ -80,14 +75,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	for i := range args.Entries {
 		logIndex := i + args.PrevLogIndex + 1
-		if logIndex > len(rf.Logs) {
+		if logIndex > rf.length() {
 			rf.Logs = append(rf.Logs, args.Entries[i:]...)
 			break
 		}
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.Logs))
+		rf.commitIndex = min(args.LeaderCommit, rf.length())
 	}
 
 	reply.Success = true
@@ -121,16 +116,16 @@ func (rf *Raft) sendHeartbeats() {
 				LeaderCommit: rf.commitIndex,
 			}
 			DPrintf("%d %d nextIndices[%v]=%v", MillisecondsPassed(rf.startTime), rf.me, i, rf.nextIndices[i])
-			if isFirstHeartbeat || (len(rf.Logs) > 0 && rf.Logs[len(rf.Logs)-1].Term != rf.CurrentTerm) {
+			if isFirstHeartbeat || (rf.length() > 0 && rf.lastLog().Term != rf.CurrentTerm) {
 				isFirstHeartbeat = false
 				args.PrevLogIndex = rf.commitIndex
 				if args.PrevLogIndex > 0 {
-					args.PrevLogTerm = rf.Logs[args.PrevLogIndex-1].Term
+					args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
 				}
-			} else if len(rf.Logs) >= rf.nextIndices[i] {
+			} else if rf.length() >= rf.nextIndices[i] {
 				args.PrevLogIndex = rf.nextIndices[i] - 1
 				if args.PrevLogIndex != 0 {
-					args.PrevLogTerm = rf.Logs[args.PrevLogIndex-1].Term
+					args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
 				}
 				args.Entries = rf.Logs[args.PrevLogIndex:]
 			}
@@ -175,7 +170,7 @@ func (rf *Raft) sendHeartbeats() {
 									count++
 								}
 							}
-							if ((count << 1) > len(rf.peers)) && (rf.Logs[i-1].Term == rf.CurrentTerm) {
+							if ((count << 1) > len(rf.peers)) && (rf.logAt(i).Term == rf.CurrentTerm) {
 								rf.commitIndex = i
 							}
 						}
@@ -186,44 +181,8 @@ func (rf *Raft) sendHeartbeats() {
 						rf.mu.Unlock()
 						break
 					} else {
-						//rf.nextIndices[index] = min(rf.nextIndices[index], 1)
-						//args.PrevLogIndex = rf.nextIndices[index] - 1
-						//if args.PrevLogIndex > 0 {
-						//	args.PrevLogTerm = rf.Logs[args.PrevLogIndex].Term
-						//}
-						//
-						//i := len(rf.Logs)
-						//for i > 0 && rf.Logs[i-1].Term != rf.CurrentTerm && rf.commitIndex < i {
-						//	i--
-						//}
-						//args.Entries = rf.Logs[args.PrevLogIndex:i]
-
-						//firstEntryWithTerm := 1
-						//for i := len(rf.Logs); i-1 >= 0 && rf.Logs[i-1].Term > reply.XTerm; i-- {
-						//	if rf.Logs[i-1].Term == reply.XTerm {
-						//		firstEntryWithTerm = i
-						//	}
-						//}
-
-						//if reply.XTerm != 0 && firstEntryWithTerm == 1 {
-						//	DPrintf(
-						//		"%d %d retry appendEntries index=%v, no entry with Term",
-						//		MillisecondsPassed(rf.startTime), rf.me, index)
-						//	rf.nextIndices[index] = min(rf.nextIndices[index], reply.XIndex)
-						//} else if firstEntryWithTerm > 0 {
-						//	DPrintf(
-						//		"%d %d retry appendEntries index=%v, has entry with Term at=%v",
-						//		MillisecondsPassed(rf.startTime), rf.me, index, firstEntryWithTerm)
-						//	rf.nextIndices[index] = min(rf.nextIndices[index], firstEntryWithTerm)
-						//} else {
-						//	DPrintf(
-						//		"%d %d retry appendEntries index=%v, too short",
-						//		MillisecondsPassed(rf.startTime), rf.me, index)
-						//	rf.nextIndices[index] = min(rf.nextIndices[index], reply.XLen)
-						//}
-
 						lastEntryWithSmallerTerm := 1
-						for i := 0; i < reply.XIndex && rf.Logs[i].Term < reply.XTerm; i++ {
+						for i := 0; i < reply.XIndex && rf.logAt(i+1).Term < reply.XTerm; i++ {
 							lastEntryWithSmallerTerm = i + 1
 						}
 
@@ -232,10 +191,10 @@ func (rf *Raft) sendHeartbeats() {
 
 						args.PrevLogIndex = rf.nextIndices[index] - 1
 						if args.PrevLogIndex > 0 {
-							args.PrevLogTerm = rf.Logs[args.PrevLogIndex-1].Term
+							args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
 						}
-						j := len(rf.Logs)
-						for j > rf.commitIndex && rf.Logs[j-1].Term != rf.CurrentTerm {
+						j := rf.length()
+						for j > rf.commitIndex && rf.logAt(j).Term != rf.CurrentTerm {
 							j--
 						}
 						args.Entries = rf.Logs[args.PrevLogIndex:j]
