@@ -1,35 +1,22 @@
 package raft
 
-// RequestVoteArgs example RequestVote RPC arguments structure.
-// field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
+	Term, CandidateId, LastLogIndex, LastLogTerm int
 }
 
-// RequestVoteReply example RequestVote RPC reply structure.
-// field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 }
 
-// RequestVote example RequestVote RPC handler.
+// RequestVote handles RequestVote RPC from a candidate.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	DPrintf("%d %d at term=%d received request vote args=%+v",
-		MillisecondsPassed(rf.startTime),
-		rf.me,
-		rf.CurrentTerm,
-		args)
+	DPrintf("%d %d at term=%d received request vote args=%+v", MillisecondsPassed(rf.startTime),
+		rf.me, rf.CurrentTerm, args)
 
 	if args.Term < rf.CurrentTerm {
 		reply.VoteGranted = false
@@ -41,33 +28,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = follower
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = nil
-		//DPrintf("%d %d becomes Follower: Term=%d", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm)
 	}
 
 	if rf.VotedFor == nil || *rf.VotedFor == args.CandidateId {
 		// check if candidate is at least as up-to-date
-		if len(rf.Logs) == 0 || args.LastLogTerm > rf.Logs[len(rf.Logs)-1].Term {
-			reply.VoteGranted = true
-			rf.VotedFor = &args.CandidateId
-			rf.heartbeatCh <- struct{}{}
-			DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
-			return
-		}
-
-		if args.LastLogTerm == rf.Logs[len(rf.Logs)-1].Term && args.LastLogIndex >= len(rf.Logs) {
-			reply.VoteGranted = true
-			rf.VotedFor = &args.CandidateId
-			rf.heartbeatCh <- struct{}{}
-			DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, args.CandidateId)
+		if lastLog := rf.lastLog(); rf.isEmpty() || args.LastLogTerm > lastLog.Term ||
+			(args.LastLogTerm == lastLog.Term && args.LastLogIndex >= rf.lastLogIndex()) {
+			rf.giveVote(args.CandidateId, reply)
 			return
 		}
 	}
-	//DPrintf("%d %d at term=%d did not vote for %d, already voted for %d",
-	//	MillisecondsPassed(rf.startTime),
-	//	rf.me,
-	//	rf.CurrentTerm,
-	//	args.CandidateId,
-	//	*rf.VotedFor)
+}
+
+func (rf *Raft) giveVote(candidateID int, reply *RequestVoteReply) {
+	reply.VoteGranted = true
+	rf.VotedFor = &candidateID
+	rf.heartbeatCh <- struct{}{}
+	DPrintf("%d %d gave vote to %d", MillisecondsPassed(rf.startTime), rf.me, candidateID)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -119,10 +96,10 @@ func (rf *Raft) requestVotes() {
 		args := &RequestVoteArgs{
 			Term:         voteTerm,
 			CandidateId:  rf.me,
-			LastLogIndex: len(rf.Logs),
+			LastLogIndex: rf.lastLogIndex(),
 		}
-		if len(rf.Logs) > 0 {
-			args.LastLogTerm = rf.Logs[len(rf.Logs)-1].Term
+		if !rf.isEmpty() {
+			args.LastLogTerm = rf.lastLog().Term
 		}
 		reply := &RequestVoteReply{}
 		rf.mu.Unlock()
@@ -148,7 +125,7 @@ func (rf *Raft) requestVotes() {
 				rf.state = leader
 				rf.nextIndices = make([]int, len(rf.peers))
 				for i := range rf.nextIndices {
-					rf.nextIndices[i] = len(rf.Logs) + 1
+					rf.nextIndices[i] = rf.length() + 1
 				}
 				rf.matchIndices = make([]int, len(rf.peers))
 				DPrintf("%d %d becomes leader at term=%v, numVotes=%v, len(rf.peers)=%v", MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, numVotes, len(rf.peers))

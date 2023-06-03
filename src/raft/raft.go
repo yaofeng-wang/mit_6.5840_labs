@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"6_5840/labgob"
-	//	"6_5840/labgob"
 	"6_5840/labrpc"
 )
 
@@ -52,11 +51,6 @@ type ApplyMsg struct {
 const (
 	heartbeatInterval = 100 * time.Millisecond // Must be gte 100ms
 )
-
-type logEntry struct {
-	Term    int
-	Command interface{}
-}
 
 // Raft A Go object implementing a single Raft peer.
 type Raft struct {
@@ -90,7 +84,10 @@ type Raft struct {
 type PersistentState struct {
 	CurrentTerm int
 	VotedFor    *int
-	Logs        []logEntry
+	Logs
+
+	LastIncludedIndex int
+	LastIncludedTerm  int
 }
 
 // GetState return currentTerm and whether this server
