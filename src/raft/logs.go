@@ -41,3 +41,7 @@ func (rf *Raft) lastLog() *logEntry {
 func (rf *Raft) lastLogIndex() int {
 	return rf.LastIncludedIndex + len(rf.Logs)
 }
+
+func (rf *Raft) appendLogs(logEntry ...logEntry) {
+	rf.Logs = append(rf.Logs, logEntry...)
+}

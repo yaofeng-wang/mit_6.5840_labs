@@ -152,22 +152,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if rf.state != leader {
-		return index, term, false
+		return -1, -1, false
 	}
-	index = len(rf.Logs) + 1
-	rf.Logs = append(rf.Logs, logEntry{Term: rf.CurrentTerm, Command: command})
-	term = rf.CurrentTerm
+	defer rf.persist()
+
+	index := rf.length() + 1
+	rf.appendLogs(logEntry{Term: rf.CurrentTerm, Command: command})
 	DPrintf("%d %d received new log at index=%v", MillisecondsPassed(rf.startTime), rf.me, index)
-	rf.persist()
-	return index, term, isLeader
+	return index, rf.CurrentTerm, true
 }
 
 // Kill the tester doesn't halt goroutines created by Raft after each test,
@@ -259,7 +255,7 @@ func (rf *Raft) applyToStateMachine() {
 			rf.lastApplied++
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
-				Command:      rf.Logs[rf.lastApplied-1].Command,
+				Command:      rf.logAt(rf.lastApplied).Command,
 				CommandIndex: rf.lastApplied,
 			}
 			DPrintf("%d %d applied log index=%v", MillisecondsPassed(rf.startTime), rf.me, rf.lastApplied)
