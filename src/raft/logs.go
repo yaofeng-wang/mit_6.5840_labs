@@ -56,7 +56,7 @@ func (rf *Raft) appendLogs(logEntry ...logEntry) {
 
 func (rf *Raft) deleteLogsFromIndex(logIndex int) {
 	// delete log at logIndex as well
-	rf.Logs = rf.Logs[:logIndex-rf.LastIncludedIndex]
+	rf.Logs = rf.Logs[:logIndex-rf.LastIncludedIndex-1]
 }
 
 func (rf *Raft) getFirstIndexWithTerm(term int) int {
@@ -71,4 +71,14 @@ func (rf *Raft) getFirstIndexWithTerm(term int) int {
 
 func (rf *Raft) logsFromIndex(logIndex int) Logs {
 	return rf.Logs[logIndex-rf.LastIncludedIndex-1:]
+}
+
+func (rf *Raft) logsInRange(from int, to int) Logs {
+	var entries Logs
+	for i := from; i <= to; i++ {
+		if rf.hasLogAt(i) {
+			entries = append(entries, *rf.logAt(i))
+		}
+	}
+	return entries
 }
