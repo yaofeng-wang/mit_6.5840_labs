@@ -6,7 +6,7 @@ import (
 )
 
 // Debug Debugging
-const Debug = true
+const Debug = false
 
 func init() {
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))

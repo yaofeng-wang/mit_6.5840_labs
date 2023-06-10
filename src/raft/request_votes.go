@@ -15,8 +15,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	defer rf.persist()
 
-	DPrintf("%d %d at term=%d received request vote args=%+v", MillisecondsPassed(rf.startTime),
-		rf.me, rf.CurrentTerm, args)
+	DPrintf("%d %d at term=%d received request vote args=%+v rf.LastIncludedIndex=%v rf.LastIncludedTerm=%v rf.lastLogIndex()=%v", MillisecondsPassed(rf.startTime),
+		rf.me, rf.CurrentTerm, args, rf.LastIncludedIndex, rf.LastIncludedTerm, rf.lastLogIndex())
 
 	if args.Term < rf.CurrentTerm {
 		reply.VoteGranted = false
@@ -32,8 +32,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if rf.VotedFor == nil || *rf.VotedFor == args.CandidateId {
 		// check if candidate is at least as up-to-date
-		if lastLog := rf.lastLog(); rf.isEmpty() || args.LastLogTerm > lastLog.Term ||
-			(args.LastLogTerm == lastLog.Term && args.LastLogIndex >= rf.lastLogIndex()) {
+
+		if rf.isEmpty() && (args.LastLogTerm > rf.LastIncludedTerm || (args.LastLogTerm == rf.LastIncludedTerm && args.LastLogIndex >= rf.LastIncludedIndex)) {
+			rf.giveVote(args.CandidateId, reply)
+			return
+		}
+
+		if lastLog := rf.lastLog(); !rf.isEmpty() && (args.LastLogTerm > lastLog.Term ||
+			(args.LastLogTerm == lastLog.Term && args.LastLogIndex >= rf.lastLogIndex())) {
 			rf.giveVote(args.CandidateId, reply)
 			return
 		}
@@ -100,6 +106,8 @@ func (rf *Raft) requestVotes() {
 		}
 		if !rf.isEmpty() {
 			args.LastLogTerm = rf.lastLog().Term
+		} else {
+			args.LastLogTerm = rf.LastIncludedTerm
 		}
 		reply := &RequestVoteReply{}
 		rf.mu.Unlock()

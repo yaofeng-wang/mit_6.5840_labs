@@ -36,7 +36,6 @@ func (rf *Raft) lastLog() *logEntry {
 }
 
 func (rf *Raft) lastLogIndex() int {
-	// will return LastIncludedIndex if there is no logs, should always check if log isEmpty first.
 	return rf.LastIncludedIndex + len(rf.Logs)
 }
 

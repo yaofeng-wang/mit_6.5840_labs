@@ -65,6 +65,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	PersistentState
+	SnapshotLogs []byte
 
 	commitIndex int
 	lastApplied int
@@ -111,7 +112,9 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.PersistentState)
 	raftState := w.Bytes()
-	rf.persister.Save(raftState, nil)
+
+	rf.persister.Save(raftState, rf.SnapshotLogs)
+	DPrintf("%d %d persist", MillisecondsPassed(rf.startTime), rf.me)
 }
 
 // restore previously persisted state.
@@ -127,6 +130,9 @@ func (rf *Raft) readPersist(data []byte) {
 		DPrintf("%d %d failed to read persistentState", MillisecondsPassed(rf.startTime), rf.me)
 	} else {
 		rf.PersistentState = persistentState
+		rf.commitIndex = rf.PersistentState.LastIncludedIndex
+		rf.lastApplied = rf.PersistentState.LastIncludedIndex
+		DPrintf("%d %d read persistentState", MillisecondsPassed(rf.startTime), rf.me)
 	}
 }
 
@@ -141,6 +147,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	DPrintf("%d %d snapshot to index=%v", MillisecondsPassed(rf.startTime), rf.me, index)
 	if rf.hasLogAt(index) {
 		rf.LastIncludedTerm = rf.logAt(index).Term
+		rf.SnapshotLogs = snapshot
 		rf.deleteLogsToIndex(index)
 		rf.LastIncludedIndex = index
 	} else {
@@ -250,6 +257,7 @@ func MakeRaft(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.SnapshotLogs = persister.ReadSnapshot()
 
 	DPrintf("%d %d ready", MillisecondsPassed(startTime), me)
 
@@ -264,13 +272,18 @@ func (rf *Raft) applyToStateMachine() {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
+			DPrintf("%d %d applying log rf.commitIndex=%v rf.lastApplied=%v", MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex, rf.lastApplied)
 			rf.lastApplied++
+			if rf.logAt(rf.lastApplied) == nil {
+				DPrintf("%d %d [error] rf.commitIndex=%v rf.lastApplied=%v rf.lastLogIndex()=%v rf.LastIncludedIndex=%v",
+					MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex, rf.lastApplied, rf.lastLogIndex(), rf.LastIncludedIndex)
+			}
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logAt(rf.lastApplied).Command,
 				CommandIndex: rf.lastApplied,
 			}
-			DPrintf("%d %d applied log index=%v", MillisecondsPassed(rf.startTime), rf.me, rf.lastApplied)
+			DPrintf("%d %d applied log rf.commitIndex=%v rf.lastApplied=%v", MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex, rf.lastApplied)
 		}
 		rf.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)

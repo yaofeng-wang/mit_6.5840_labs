@@ -21,9 +21,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf("%d %d receives AppendEntries: term=%v args=%+v rf.lastLogIndex()=%v rf.commitIndex=%v",
-		MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args, rf.lastLogIndex(), rf.commitIndex)
-
+	DPrintf("%d %d receives AppendEntries: term=%v args=%+v rf.lastLogIndex()=%v rf.commitIndex=%v rf.lastApplied=%v",
+		MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args, rf.lastLogIndex(), rf.commitIndex, rf.lastApplied)
+	if rf.commitIndex == 0 {
+		DPrintf("%d %d [error] rf.commitIndex=%v rf.lastApplied=%v rf.lastLogIndex()=%v rf.LastIncludedIndex=%v",
+			MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex, rf.lastApplied, rf.lastLogIndex(), rf.LastIncludedIndex)
+	}
 	if args.Term > rf.CurrentTerm {
 		rf.state = follower
 		rf.CurrentTerm = args.Term
@@ -42,22 +45,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}()
 	if args.PrevLogIndex > 0 {
 		if rf.lastLogIndex() < args.PrevLogIndex {
-			reply.XLen = rf.length()
-			DPrintf("%d %d logs too short XLen=%v", MillisecondsPassed(rf.startTime),
+			//reply.XLen = rf.length()
+			reply.XIndex = rf.lastLogIndex()
+			if rf.hasLogAt(rf.lastLogIndex()) {
+				reply.XTerm = rf.logAt(rf.lastLogIndex()).Term
+			} else {
+				reply.XTerm = rf.LastIncludedTerm
+			}
+			DPrintf("%d %d logs too short rf.lastLogIndex()=%v args.PrevLogIndex=%v", MillisecondsPassed(rf.startTime),
 				rf.me,
-				reply.XLen)
+				rf.lastLogIndex(), args.PrevLogIndex)
 			return
 		} else if rf.hasLogAt(args.PrevLogIndex) && args.PrevLogTerm != rf.logAt(args.PrevLogIndex).Term {
-			reply.XTerm = rf.logAt(args.PrevLogIndex).Term
-			firstEntryOfTerm := 1
-			for i := 0; i-1 < rf.length(); i++ {
-				if rf.logAt(i+1).Term == reply.XTerm {
-					firstEntryOfTerm = i + 1
+			reply.XTerm = min(args.PrevLogTerm, rf.logAt(args.PrevLogIndex).Term)
+			firstEntryOfTerm := rf.LastIncludedIndex + 1
+			for i := firstEntryOfTerm; rf.hasLogAt(i); i++ {
+				if rf.logAt(i).Term == reply.XTerm {
+					firstEntryOfTerm = i
 					break
 				}
 			}
 			reply.XIndex = firstEntryOfTerm
-			reply.XLen = rf.length()
+			//reply.XLen = rf.length()
 			DPrintf("%d %d conflict at PrevLog XTerm=%v, XIndex=%v",
 				MillisecondsPassed(rf.startTime),
 				rf.me,
@@ -85,6 +94,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.lastLogIndex())
+		if rf.commitIndex == 0 {
+			DPrintf("%d %d rf.commitIndex == 0", MillisecondsPassed(rf.startTime), rf.me)
+		}
 	}
 
 	reply.Success = true
@@ -126,7 +138,7 @@ func (rf *Raft) sendHeartbeats() {
 				} else if args.PrevLogIndex == rf.LastIncludedIndex {
 					args.PrevLogTerm = rf.LastIncludedTerm
 				} else {
-					DPrintf("%d %d [Error]PrevLogIndex is in snapshot args.PrevLogIndex=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, args.PrevLogIndex, rf.LastIncludedIndex)
+					DPrintf("%d %d [Error]PrevLogIndex is in snapshot i=%v args.PrevLogIndex=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, i, args.PrevLogIndex, rf.LastIncludedIndex)
 				}
 			} else {
 				args.PrevLogIndex = rf.nextIndices[i] - 1
@@ -137,15 +149,19 @@ func (rf *Raft) sendHeartbeats() {
 					args.PrevLogTerm = rf.LastIncludedTerm
 					args.Entries = rf.logsFromIndex(rf.nextIndices[i])
 				} else {
-					go func(i int) {
-						DPrintf("%d %d PrevLogIndex is in snapshot args.PrevLogIndex=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, args.PrevLogIndex, rf.LastIncludedIndex)
+					go func(index int) {
 						rf.mu.Lock()
 						args := &InstallSnapshotArgs{
-							Term: rf.CurrentTerm,
+							Term:              rf.CurrentTerm,
+							LeaderId:          rf.me,
+							LastIncludedIndex: rf.LastIncludedIndex,
+							LastIncludedTerm:  rf.LastIncludedTerm,
+							Data:              rf.SnapshotLogs,
 						}
-						reply := &InstallSnapshotReply{}
 						rf.mu.Unlock()
 						for ii := 0; ii < 9; ii++ {
+							reply := &InstallSnapshotReply{}
+							DPrintf("%d %d PrevLogIndex is in snapshot rf.nextIndices[%v]=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, index, rf.nextIndices[index], rf.LastIncludedIndex)
 							if ok := rf.sendInstallSnapshot(i, args, reply); ok {
 								rf.mu.Lock()
 								if reply.Term > rf.CurrentTerm {
@@ -154,11 +170,15 @@ func (rf *Raft) sendHeartbeats() {
 									rf.VotedFor = nil
 									rf.persist()
 								}
+
+								rf.matchIndices[index] = max(rf.matchIndices[index], rf.LastIncludedIndex)
+								rf.nextIndices[index] = max(rf.nextIndices[index], rf.LastIncludedIndex+1)
 								rf.mu.Unlock()
 								return
 							}
 						}
 					}(i)
+					rf.mu.Unlock()
 					continue
 				}
 			}
@@ -204,6 +224,9 @@ func (rf *Raft) sendHeartbeats() {
 							}
 							if ((count << 1) > len(rf.peers)) && (rf.logAt(i).Term == rf.CurrentTerm) {
 								rf.commitIndex = i
+								if rf.commitIndex == 0 {
+									DPrintf("%d %d rf.commitIndex == 0", MillisecondsPassed(rf.startTime), rf.me)
+								}
 							}
 						}
 						if origCommitIndex != rf.commitIndex {
@@ -213,36 +236,71 @@ func (rf *Raft) sendHeartbeats() {
 						rf.mu.Unlock()
 						break
 					} else {
-						lastEntryWithSmallerTerm := rf.LastIncludedIndex + 1
-						for i := 0; rf.hasLogAt(i) && rf.logAt(i).Term < reply.XTerm; i++ {
-							lastEntryWithSmallerTerm = i + 1
-						}
+						rf.nextIndices[index] = reply.XIndex
+						if reply.XIndex < rf.LastIncludedIndex {
+							args := &InstallSnapshotArgs{
+								Term:              rf.CurrentTerm,
+								LeaderId:          rf.me,
+								LastIncludedIndex: rf.LastIncludedIndex,
+								LastIncludedTerm:  rf.LastIncludedTerm,
+								Data:              rf.SnapshotLogs,
+							}
+							rf.mu.Unlock()
+							for ii := 0; ii < 9; ii++ {
+								DPrintf("%d %d PrevLogIndex in %v is in snapshot reply.XIndex =%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, index, reply.XIndex, rf.LastIncludedIndex)
+								reply := &InstallSnapshotReply{}
+								if ok := rf.sendInstallSnapshot(index, args, reply); ok {
+									rf.mu.Lock()
+									if reply.Term > rf.CurrentTerm {
+										rf.state = follower
+										rf.CurrentTerm = reply.Term
+										rf.VotedFor = nil
+										rf.persist()
+									}
 
-						rf.nextIndices[index] = lastEntryWithSmallerTerm
-						args.PrevLogIndex = rf.nextIndices[index] - 1
-						if rf.hasLogAt(args.PrevLogIndex) {
-							args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
-						} else if args.PrevLogIndex == rf.LastIncludedIndex {
-							args.PrevLogTerm = rf.LastIncludedTerm
-						}
-						args.Entries = rf.logsFromIndex(rf.nextIndices[index])
-						if len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Term != rf.CurrentTerm {
-							args.Entries = rf.logsInRange(rf.nextIndices[index], rf.commitIndex)
-						}
+									rf.matchIndices[index] = max(rf.matchIndices[index], rf.LastIncludedIndex)
+									rf.nextIndices[index] = max(rf.nextIndices[index], rf.LastIncludedIndex+1)
+									rf.mu.Unlock()
+									return
+								}
+							}
+						} else {
+							lastEntryWithSmallerTerm := rf.LastIncludedIndex + 1
+							for i := lastEntryWithSmallerTerm; rf.hasLogAt(i) && rf.logAt(i).Term < reply.XTerm; i++ {
+								lastEntryWithSmallerTerm = i
+							}
 
-						args.LeaderCommit = rf.commitIndex
+							rf.nextIndices[index] = lastEntryWithSmallerTerm
+							args.PrevLogIndex = rf.nextIndices[index] - 1
+							if rf.hasLogAt(args.PrevLogIndex) {
+								args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
+								args.Entries = rf.logsFromIndex(rf.nextIndices[index])
+							} else if args.PrevLogIndex == rf.LastIncludedIndex {
+								args.PrevLogTerm = rf.LastIncludedTerm
+								args.Entries = rf.logsFromIndex(rf.nextIndices[index])
+							} else {
+								DPrintf("%d %d [error] rf.nextIndices[%v]=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, index, rf.nextIndices[index], rf.LastIncludedIndex)
+							}
 
-						DPrintf(
-							"%d %d retry appendEntries index=%v, reply.XIndex=%v, "+
-								"reply.XTerm=%v, PrevLogIndex=%v, PrevLogTerm=%v",
-							MillisecondsPassed(rf.startTime),
-							rf.me,
-							index,
-							reply.XIndex,
-							reply.XTerm,
-							args.PrevLogIndex,
-							args.PrevLogTerm)
-						rf.mu.Unlock()
+							if len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Term != rf.CurrentTerm {
+								args.Entries = rf.logsInRange(rf.nextIndices[index], rf.commitIndex)
+							}
+
+							args.LeaderCommit = rf.commitIndex
+
+							DPrintf(
+								"%d %d retry appendEntries index=%v, reply.XIndex=%v, "+
+									"reply.XTerm=%v, PrevLogIndex=%v, PrevLogTerm=%v",
+								MillisecondsPassed(rf.startTime),
+								rf.me,
+								index,
+								reply.XIndex,
+								reply.XTerm,
+								args.PrevLogIndex,
+								args.PrevLogTerm)
+							rf.mu.Unlock()
+
+						}
 						time.Sleep(10 * time.Millisecond)
 					}
 				}
