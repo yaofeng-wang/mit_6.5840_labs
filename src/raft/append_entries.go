@@ -21,8 +21,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf("%d %d receives AppendEntries: term=%v args=%+v rf.length()=%v rf.commitIndex=%v",
-		MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args, rf.length(), rf.commitIndex)
+	DPrintf("%d %d receives AppendEntries: term=%v args=%+v rf.lastLogIndex()=%v rf.commitIndex=%v",
+		MillisecondsPassed(rf.startTime), rf.me, rf.CurrentTerm, args, rf.lastLogIndex(), rf.commitIndex)
 
 	if args.Term > rf.CurrentTerm {
 		rf.state = follower
@@ -36,16 +36,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	defer func() {
+		DPrintf("%d %d try to send heartbeat", MillisecondsPassed(rf.startTime), rf.me)
 		rf.heartbeatCh <- struct{}{}
+		DPrintf("%d %d sent heartbeat", MillisecondsPassed(rf.startTime), rf.me)
 	}()
 	if args.PrevLogIndex > 0 {
-		if rf.length() < args.PrevLogIndex {
+		if rf.lastLogIndex() < args.PrevLogIndex {
 			reply.XLen = rf.length()
 			DPrintf("%d %d logs too short XLen=%v", MillisecondsPassed(rf.startTime),
 				rf.me,
 				reply.XLen)
 			return
-		} else if args.PrevLogTerm != rf.logAt(args.PrevLogIndex).Term {
+		} else if rf.hasLogAt(args.PrevLogIndex) && args.PrevLogTerm != rf.logAt(args.PrevLogIndex).Term {
 			reply.XTerm = rf.logAt(args.PrevLogIndex).Term
 			firstEntryOfTerm := 1
 			for i := 0; i-1 < rf.length(); i++ {
@@ -82,7 +84,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, rf.length())
+		rf.commitIndex = min(args.LeaderCommit, rf.lastLogIndex())
 	}
 
 	reply.Success = true
@@ -116,18 +118,49 @@ func (rf *Raft) sendHeartbeats() {
 				LeaderCommit: rf.commitIndex,
 			}
 			DPrintf("%d %d nextIndices[%v]=%v", MillisecondsPassed(rf.startTime), rf.me, i, rf.nextIndices[i])
-			if isFirstHeartbeat || (rf.length() > 0 && rf.lastLog().Term != rf.CurrentTerm) {
+			if isFirstHeartbeat || (!rf.isEmpty() && rf.lastLog().Term != rf.CurrentTerm) {
 				isFirstHeartbeat = false
 				args.PrevLogIndex = rf.commitIndex
-				if args.PrevLogIndex > 0 {
+				if rf.hasLogAt(args.PrevLogIndex) {
 					args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
+				} else if args.PrevLogIndex == rf.LastIncludedIndex {
+					args.PrevLogTerm = rf.LastIncludedTerm
+				} else {
+					DPrintf("%d %d [Error]PrevLogIndex is in snapshot args.PrevLogIndex=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, args.PrevLogIndex, rf.LastIncludedIndex)
 				}
-			} else if rf.length() >= rf.nextIndices[i] {
+			} else {
 				args.PrevLogIndex = rf.nextIndices[i] - 1
-				if args.PrevLogIndex != 0 {
+				if rf.hasLogAt(args.PrevLogIndex) {
 					args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
+					args.Entries = rf.logsFromIndex(rf.nextIndices[i])
+				} else if args.PrevLogIndex == rf.LastIncludedIndex {
+					args.PrevLogTerm = rf.LastIncludedTerm
+					args.Entries = rf.logsFromIndex(rf.nextIndices[i])
+				} else {
+					go func(i int) {
+						DPrintf("%d %d PrevLogIndex is in snapshot args.PrevLogIndex=%v rf.LastIncludedIndex=%v", MillisecondsPassed(rf.startTime), rf.me, args.PrevLogIndex, rf.LastIncludedIndex)
+						rf.mu.Lock()
+						args := &InstallSnapshotArgs{
+							Term: rf.CurrentTerm,
+						}
+						reply := &InstallSnapshotReply{}
+						rf.mu.Unlock()
+						for ii := 0; ii < 9; ii++ {
+							if ok := rf.sendInstallSnapshot(i, args, reply); ok {
+								rf.mu.Lock()
+								if reply.Term > rf.CurrentTerm {
+									rf.state = follower
+									rf.CurrentTerm = reply.Term
+									rf.VotedFor = nil
+									rf.persist()
+								}
+								rf.mu.Unlock()
+								return
+							}
+						}
+					}(i)
+					continue
 				}
-				args.Entries = rf.logsFromIndex(args.PrevLogIndex + 1)
 			}
 
 			rf.mu.Unlock()
@@ -140,7 +173,6 @@ func (rf *Raft) sendHeartbeats() {
 					}
 
 					rf.mu.Lock()
-
 					if reply.Term < rf.CurrentTerm {
 						rf.mu.Unlock()
 						return
@@ -182,16 +214,16 @@ func (rf *Raft) sendHeartbeats() {
 						break
 					} else {
 						lastEntryWithSmallerTerm := rf.LastIncludedIndex + 1
-						for i := 0; i < reply.XIndex && rf.logAt(i+1).Term < reply.XTerm; i++ {
+						for i := 0; rf.hasLogAt(i) && rf.logAt(i).Term < reply.XTerm; i++ {
 							lastEntryWithSmallerTerm = i + 1
 						}
 
-						rf.nextIndices[index] = min(rf.nextIndices[index], lastEntryWithSmallerTerm)
-						rf.nextIndices[index] = max(rf.nextIndices[index], 1)
-
+						rf.nextIndices[index] = lastEntryWithSmallerTerm
 						args.PrevLogIndex = rf.nextIndices[index] - 1
-						if args.PrevLogIndex > 0 {
+						if rf.hasLogAt(args.PrevLogIndex) {
 							args.PrevLogTerm = rf.logAt(args.PrevLogIndex).Term
+						} else if args.PrevLogIndex == rf.LastIncludedIndex {
+							args.PrevLogTerm = rf.LastIncludedTerm
 						}
 						args.Entries = rf.logsFromIndex(rf.nextIndices[index])
 						if len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Term != rf.CurrentTerm {

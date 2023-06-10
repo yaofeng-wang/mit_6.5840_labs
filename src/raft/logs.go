@@ -32,10 +32,7 @@ func (rf *Raft) isEmpty() bool {
 }
 
 func (rf *Raft) lastLog() *logEntry {
-	if rf.isEmpty() {
-		return nil
-	}
-	return rf.logAt(rf.length())
+	return rf.logAt(rf.lastLogIndex())
 }
 
 func (rf *Raft) lastLogIndex() int {
@@ -81,4 +78,16 @@ func (rf *Raft) logsInRange(from int, to int) Logs {
 		}
 	}
 	return entries
+}
+
+func (rf *Raft) deleteLogsToIndex(logIndex int) {
+	var entries Logs
+	for i := logIndex + 1; rf.hasLogAt(i); i++ {
+		entries = append(entries, *rf.logAt(i))
+	}
+	rf.Logs = entries
+}
+
+func (rf *Raft) deleteAllLogs() {
+	rf.Logs = make([]logEntry, 0)
 }

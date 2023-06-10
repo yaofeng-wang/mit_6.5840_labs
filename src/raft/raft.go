@@ -136,7 +136,19 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("%d %d snapshot to index=%v", MillisecondsPassed(rf.startTime), rf.me, index)
+	if rf.hasLogAt(index) {
+		rf.LastIncludedTerm = rf.logAt(index).Term
+		rf.deleteLogsToIndex(index)
+		rf.LastIncludedIndex = index
+	} else {
+		DPrintf("%d %d failed to snapshot to index=%v logs=%+v "+
+			"LastIncludedIndex=%v LastIncludedTerm=%v",
+			MillisecondsPassed(rf.startTime), rf.me, index, rf.Logs, rf.LastIncludedIndex,
+			rf.LastIncludedTerm)
+	}
 }
 
 // Start the service using Raft (e.g. a k/v server) wants to start
@@ -160,7 +172,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	defer rf.persist()
 
-	index := rf.length() + 1
+	index := rf.lastLogIndex() + 1
 	rf.appendLogs(logEntry{Term: rf.CurrentTerm, Command: command})
 	DPrintf("%d %d received new log at index=%v", MillisecondsPassed(rf.startTime), rf.me, index)
 	return index, rf.CurrentTerm, true
