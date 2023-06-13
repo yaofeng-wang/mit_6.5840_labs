@@ -114,7 +114,6 @@ func (rf *Raft) persist() {
 	raftState := w.Bytes()
 
 	rf.persister.Save(raftState, rf.SnapshotLogs)
-	DPrintf("%d %d persist", MillisecondsPassed(rf.startTime), rf.me)
 }
 
 // restore previously persisted state.
@@ -275,7 +274,7 @@ func (rf *Raft) applyToStateMachine() {
 			DPrintf("%d %d applying log rf.commitIndex=%v rf.lastApplied=%v", MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex, rf.lastApplied)
 			rf.lastApplied++
 			if rf.logAt(rf.lastApplied) == nil {
-				DPrintf("%d %d [error] rf.commitIndex=%v rf.lastApplied=%v rf.lastLogIndex()=%v rf.LastIncludedIndex=%v",
+				DPrintf("%d %d [error] log of rf.LastApplied is nil rf.commitIndex=%v rf.lastApplied=%v rf.lastLogIndex()=%v rf.LastIncludedIndex=%v",
 					MillisecondsPassed(rf.startTime), rf.me, rf.commitIndex, rf.lastApplied, rf.lastLogIndex(), rf.LastIncludedIndex)
 			}
 			rf.applyCh <- ApplyMsg{

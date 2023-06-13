@@ -26,30 +26,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	DPrintf("%d %d received snapshot rf.LastIncludedIndex=%v args.LastIncludedIndex=%v",
 		MillisecondsPassed(rf.startTime), rf.me, rf.LastIncludedIndex, args.LastIncludedIndex)
-	//reply.Term = rf.CurrentTerm
-	//if rf.LastIncludedIndex < args.LastIncludedIndex {
-	//	rf.LastIncludedTerm = args.LastIncludedTerm
-	//	rf.LastIncludedIndex = args.LastIncludedIndex
-	//	rf.SnapshotLogs = args.Data
-	//	DPrintf("%d %d received newer snapshot rf.LastIncludedIndex=%v rf.LastIncludedTerm=%v args.Data=%v",
-	//		MillisecondsPassed(rf.startTime), rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm, args.Data)
-	//	if rf.commitIndex <= args.LastIncludedIndex || rf.commitIndex <= args.LastIncludedIndex {
-	//		DPrintf("%d %d commits & applies newer snapshot rf.LastIncludedIndex=%v rf.LastIncludedTerm=%v args.Data=%v",
-	//			MillisecondsPassed(rf.startTime), rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm, args.Data)
-	//		rf.commitIndex = args.LastIncludedIndex
-	//		if rf.commitIndex == 0 {
-	//			DPrintf("%d %d rf.commitIndex == 0", MillisecondsPassed(rf.startTime), rf.me)
-	//		}
-	//		rf.lastApplied = args.LastIncludedIndex
-	//		rf.deleteAllLogs()
-	//		rf.applyCh <- ApplyMsg{
-	//			SnapshotValid: true,
-	//			Snapshot:      args.Data,
-	//			SnapshotIndex: args.LastIncludedIndex,
-	//			SnapshotTerm:  args.LastIncludedTerm,
-	//		}
-	//	}
-	//}
 
 	if rf.LastIncludedIndex >= args.LastIncludedIndex {
 		return
