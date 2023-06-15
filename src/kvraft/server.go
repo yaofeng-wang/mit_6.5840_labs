@@ -11,7 +11,7 @@ import (
 	"6_5840/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -20,10 +20,21 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type OpType int
+
+const (
+	OpTypeGet OpType = iota
+	OpTypePut
+	OpTypeAppend
+)
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType OpType
+	Key    string
+	Value  string
 }
 
 type KVServer struct {
@@ -36,14 +47,98 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	keyValues         map[string]string
+	pendingLogIndices map[int]chan Op
+
+	start time.Time
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	op := Op{
+		OpType: OpTypeGet,
+		Key:    args.Key,
+	}
+
+	logIndex, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	DPrintf("%v [server] me=%v Get key=%v logIndex=%v",
+		time.Since(kv.start).Milliseconds(), kv.me, op.Key, logIndex)
+	logIndexCommittedCh := make(chan Op)
+	kv.mu.Lock()
+	kv.pendingLogIndices[logIndex] = logIndexCommittedCh
+	kv.mu.Unlock()
+
+	// blocks until the logIndex is committed
+	resp := <-logIndexCommittedCh
+	kv.mu.Lock()
+	delete(kv.pendingLogIndices, logIndex)
+	kv.mu.Unlock()
+	reply.Value = resp.Value
+	reply.Err = OK
+}
+
+func (kv *KVServer) readApplyCh() {
+	for msg := range kv.applyCh {
+		logIndex := msg.CommandIndex
+		op := msg.Command.(Op)
+		DPrintf("%v [server] me=%v readApplyCh msg=%v",
+			time.Since(kv.start).Milliseconds(), kv.me, msg)
+		kv.mu.Lock()
+		switch op.OpType {
+		case OpTypePut:
+			kv.keyValues[op.Key] = op.Value
+		case OpTypeGet:
+			op.Value = kv.keyValues[op.Key]
+		case OpTypeAppend:
+			op.Value = kv.keyValues[op.Key] + op.Value
+			kv.keyValues[op.Key] = op.Value
+		}
+		pendingCh := kv.pendingLogIndices[logIndex]
+		kv.mu.Unlock()
+
+		if pendingCh != nil {
+			pendingCh <- op
+		}
+
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	op := Op{
+		Key:   args.Key,
+		Value: args.Value,
+	}
+	switch args.Op {
+	case "Put":
+		op.OpType = OpTypePut
+	case "Append":
+		op.OpType = OpTypeAppend
+	}
+
+	logIndex, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	DPrintf("%v [server] me=%v PutAppend args.Op=%v key=%v value=%v logIndex=%v",
+		time.Since(kv.start).Milliseconds(), kv.me, args.Op, op.Key, op.Value, logIndex)
+
+	logIndexCommittedCh := make(chan Op)
+	kv.mu.Lock()
+	kv.pendingLogIndices[logIndex] = logIndexCommittedCh
+	kv.mu.Unlock()
+
+	// blocks until the logIndex is committed
+	<-logIndexCommittedCh
+	kv.mu.Lock()
+	delete(kv.pendingLogIndices, logIndex)
+	kv.mu.Unlock()
+	reply.Err = OK
 }
 
 // Kill the tester calls Kill() when a KVServer instance won't
@@ -58,6 +153,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.applyCh)
 }
 
 func (kv *KVServer) killed() bool {
@@ -77,7 +173,7 @@ func (kv *KVServer) killed() bool {
 // you don't need to snapshot.
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
+func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, start time.Time) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
@@ -88,10 +184,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
+	kv.start = start
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.MakeRaft(servers, me, persister, kv.applyCh, time.Now())
-
+	kv.rf = raft.MakeRaft(servers, me, persister, kv.applyCh, kv.start)
+	kv.keyValues = make(map[string]string)
+	kv.pendingLogIndices = make(map[int]chan Op)
 	// You may need initialization code here.
+	go kv.readApplyCh()
 
+	DPrintf("%v me=%v started", time.Since(kv.start).Milliseconds(), me)
 	return kv
 }

@@ -26,7 +26,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
-// fetch the current value for a key.
+// Get fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 //
@@ -39,10 +39,25 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	value := ""
+	args := GetArgs{
+		Key: key,
+	}
+	for i := range ck.servers {
+		reply := GetReply{}
+		if ok := ck.servers[i].Call("KVServer.Get", &args, &reply); ok {
+			DPrintf("Get reply=%v", reply)
+			if reply.Err == ErrWrongLeader {
+				continue
+			}
+			value = reply.Value
+			break
+		}
+	}
+	return value
 }
 
-// shared by Put and Append.
+// PutAppend shared by Put and Append.
 //
 // you can send an RPC with code like this:
 // ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
@@ -52,6 +67,21 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+	for i := range ck.servers {
+		reply := PutAppendReply{}
+		if ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply); ok {
+			DPrintf("PutAppend reply=%v", reply)
+			if reply.Err == ErrWrongLeader {
+				continue
+			}
+			break
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
